@@ -38,6 +38,7 @@ async def _run_on_gpu(fn, *args, **kwargs):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
 
+
 # --- Helper Functions ---
 
 
@@ -230,13 +231,17 @@ async def segment_point(req: PointPromptRequest):
         return await _run_on_gpu(_do_segment_point, pil_image, req.point_coords)
     except Exception as e:
         logger.error(f"Point prompt inference failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Point prompt inference failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Point prompt inference failed: {e}"
+        )
 
 
 def main(
     device: str = "cuda",
     port: int = 8114,
     host: str = "127.0.0.1",
+    checkpoint_path: str | None = None,
+    load_from_hf: bool = True,
 ):
     global _MODEL, _PROCESSOR, _DEVICE
 
@@ -256,8 +261,25 @@ def main(
 
     logger.info("Loading SAM3 model...")
     try:
-        # Assuming build_sam3_image_model loads default checkpoint
-        _MODEL = build_sam3_image_model(enable_inst_interactivity=True)
+        # Load model with optional checkpoint path
+        if checkpoint_path:
+            logger.info(f"Loading from checkpoint: {checkpoint_path}")
+            _MODEL = build_sam3_image_model(
+                enable_inst_interactivity=True,
+                checkpoint_path=checkpoint_path,
+                load_from_HF=False,  # Don't download from HF when using local checkpoint
+            )
+        elif load_from_hf:
+            logger.info("Loading from HuggingFace")
+            _MODEL = build_sam3_image_model(
+                enable_inst_interactivity=True,
+                load_from_HF=True,
+            )
+        else:
+            logger.warning(
+                "No checkpoint specified and load_from_hf=False. Model may not be properly initialized."
+            )
+            _MODEL = build_sam3_image_model(enable_inst_interactivity=True)
     except Exception as e:
         logger.error(f"Error building SAM3 model: {e}")
         raise
