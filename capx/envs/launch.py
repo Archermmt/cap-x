@@ -34,6 +34,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 # CLI argument dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LaunchArgs:
     """Command-line arguments for CaP-X evaluation.
@@ -127,6 +128,7 @@ class LaunchArgs:
 # Web UI
 # ---------------------------------------------------------------------------
 
+
 def _ensure_frontend_built() -> None:
     """Auto-build the web-ui frontend if ``dist/`` is missing or stale."""
     import shutil
@@ -143,7 +145,11 @@ def _ensure_frontend_built() -> None:
 
     needs_build = not dist_dir.exists()
     if not needs_build:
-        dist_mtime = (dist_dir / "index.html").stat().st_mtime if (dist_dir / "index.html").exists() else 0
+        dist_mtime = (
+            (dist_dir / "index.html").stat().st_mtime
+            if (dist_dir / "index.html").exists()
+            else 0
+        )
         for src_file in (webui_dir / "src").rglob("*"):
             if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
                 needs_build = True
@@ -163,10 +169,14 @@ def _ensure_frontend_built() -> None:
     if not node_bin.exists():
         nodeenv_bin = shutil.which("nodeenv")
         if nodeenv_bin is None:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "-q", "nodeenv"])
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--user", "-q", "nodeenv"]
+            )
             nodeenv_bin = shutil.which("nodeenv")
             if nodeenv_bin is None:
-                raise RuntimeError("Could not install nodeenv. Install Node.js manually.")
+                raise RuntimeError(
+                    "Could not install nodeenv. Install Node.js manually."
+                )
         nodeenv_cmd = [nodeenv_bin, "--prebuilt", "--node=20.18.1"]
         # nodeenv exits with code 2 if the target directory already exists,
         # which can happen after an interrupted install.
@@ -177,7 +187,9 @@ def _ensure_frontend_built() -> None:
     env = {**os.environ, "PATH": f"{nodeenv_dir / 'bin'}:{os.environ.get('PATH', '')}"}
     node_modules = webui_dir / "node_modules"
     pkg_json = webui_dir / "package.json"
-    if not node_modules.exists() or (pkg_json.exists() and pkg_json.stat().st_mtime > node_modules.stat().st_mtime):
+    if not node_modules.exists() or (
+        pkg_json.exists() and pkg_json.stat().st_mtime > node_modules.stat().st_mtime
+    ):
         subprocess.check_call([str(npm_bin), "install"], cwd=webui_dir, env=env)
     subprocess.check_call([str(npm_bin), "run", "build"], cwd=webui_dir, env=env)
     print("[web-ui] Frontend build complete")
@@ -200,13 +212,22 @@ def _run_web_ui(args: LaunchArgs, config: dict[str, Any]) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main(args: LaunchArgs) -> None:
     """Load config and dispatch to web UI or headless trial execution."""
-    from capx.envs.runner import _run_headless_trials, _start_api_servers, _stop_api_servers
+    from capx.envs.runner import (
+        _run_headless_trials,
+        _start_api_servers,
+        _stop_api_servers,
+    )
 
     start_time = time.time()
     env_factory, config, api_servers = _load_config(args)
     server_procs = _start_api_servers(api_servers)
+    if config.get("model"):
+        args.model = config["model"]
+    if config.get("visual_differencing_model"):
+        args.visual_differencing_model = config["visual_differencing_model"]
 
     try:
         if config.get("web_ui", False):
@@ -219,6 +240,7 @@ def main(args: LaunchArgs) -> None:
         except KeyboardInterrupt:
             # Force exit if user interrupts during cleanup
             import sys
+
             sys.exit(1)
 
 

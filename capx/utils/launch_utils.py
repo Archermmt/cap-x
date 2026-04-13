@@ -116,47 +116,77 @@ def _load_config(args: LaunchArgs) -> tuple[Any, dict[str, Any], list]:
 
     # Build merged config dict (CLI args override YAML)
     merged_config = {
-        "total_trials": args.total_trials
-        if args.total_trials is not None
-        else configs_dict.get("trials", 10),
-        "num_workers": args.num_workers
-        if args.num_workers is not None
-        else configs_dict.get("num_workers", 1),
-        "record_video": args.record_video
-        if args.record_video is not None
-        else configs_dict.get("record_video", False),
-        "output_dir": args.output_dir
-        if args.output_dir is not None
-        else configs_dict.get("output_dir", None),
-        "use_oracle_code": args.use_oracle_code
-        if args.use_oracle_code is not None
-        else configs_dict.get("use_oracle_code", False),
+        "total_trials": (
+            args.total_trials
+            if args.total_trials is not None
+            else configs_dict.get("trials", 10)
+        ),
+        "num_workers": (
+            args.num_workers
+            if args.num_workers is not None
+            else configs_dict.get("num_workers", 1)
+        ),
+        "record_video": (
+            args.record_video
+            if args.record_video is not None
+            else configs_dict.get("record_video", False)
+        ),
+        "output_dir": (
+            args.output_dir
+            if args.output_dir is not None
+            else configs_dict.get("output_dir", None)
+        ),
+        "use_oracle_code": (
+            args.use_oracle_code
+            if args.use_oracle_code is not None
+            else configs_dict.get("use_oracle_code", False)
+        ),
         "resume_idx": configs_dict.get("resume_idx", None),
-        "use_visual_feedback": args.use_visual_feedback
-        if args.use_visual_feedback is not None
-        else configs_dict.get("use_visual_feedback", False),
-        "use_img_differencing": args.use_img_differencing
-        if args.use_img_differencing is not None
-        else configs_dict.get("use_img_differencing", False),
-        "use_parallel_ensemble": args.use_parallel_ensemble
-        if args.use_parallel_ensemble is not None
-        else configs_dict.get("use_parallel_ensemble", False),
-        "use_video_differencing": args.use_video_differencing
-        if args.use_video_differencing is not None
-        else configs_dict.get("use_video_differencing", False),
-        "use_wrist_camera": args.use_wrist_camera
-        if args.use_wrist_camera is not None
-        else configs_dict.get("use_wrist_camera", False),
-        "use_multimodel": args.use_multimodel
-        if args.use_multimodel is not None
-        else configs_dict.get("use_multimodel", False),
-        "web_ui": getattr(args, "web_ui", None)
-        if getattr(args, "web_ui", None) is not None
-        else configs_dict.get("web_ui", False),
-        "web_ui_port": getattr(args, "web_ui_port", None)
-        if getattr(args, "web_ui_port", None) is not None
-        else configs_dict.get("web_ui_port", 8200),
+        "use_visual_feedback": (
+            args.use_visual_feedback
+            if args.use_visual_feedback is not None
+            else configs_dict.get("use_visual_feedback", False)
+        ),
+        "use_img_differencing": (
+            args.use_img_differencing
+            if args.use_img_differencing is not None
+            else configs_dict.get("use_img_differencing", False)
+        ),
+        "use_parallel_ensemble": (
+            args.use_parallel_ensemble
+            if args.use_parallel_ensemble is not None
+            else configs_dict.get("use_parallel_ensemble", False)
+        ),
+        "use_video_differencing": (
+            args.use_video_differencing
+            if args.use_video_differencing is not None
+            else configs_dict.get("use_video_differencing", False)
+        ),
+        "use_wrist_camera": (
+            args.use_wrist_camera
+            if args.use_wrist_camera is not None
+            else configs_dict.get("use_wrist_camera", False)
+        ),
+        "use_multimodel": (
+            args.use_multimodel
+            if args.use_multimodel is not None
+            else configs_dict.get("use_multimodel", False)
+        ),
+        "web_ui": (
+            getattr(args, "web_ui", None)
+            if getattr(args, "web_ui", None) is not None
+            else configs_dict.get("web_ui", False)
+        ),
+        "web_ui_port": (
+            getattr(args, "web_ui_port", None)
+            if getattr(args, "web_ui_port", None) is not None
+            else configs_dict.get("web_ui_port", 8200)
+        ),
         "save_multiturn_prompts": configs_dict.get("save_multiturn_prompts", False),
+        "model": configs_dict.get("model", None),
+        "visual_differencing_model": configs_dict.get(
+            "visual_differencing_model", None
+        ),
     }
 
     return env_factory, merged_config, api_servers
@@ -238,13 +268,21 @@ def _build_multi_turn_decision_prompt_legacy(
                 "executed):"
             )
         multi_turn_decision_prompt[-1]["content"].append(
-            {"type": "text", "text": f"{feedback_header}\n{visual_differencing_feedback}"}
+            {
+                "type": "text",
+                "text": f"{feedback_header}\n{visual_differencing_feedback}",
+            }
         )
     multi_turn_decision_prompt[-1]["content"].append(
-        {"type": "text", "text": "Based on the code output, potential error messages, and the observation made above, carefully reason about the following:\nPlease respond with EXACTLY ONE of the following:\n- The word 'REGENERATE' followed immediately by new Python code in a fenced code block (```python...```) if you want to modify the code.\n- The word 'FINISH' if the task appears to be complete"}
+        {
+            "type": "text",
+            "text": "Based on the code output, potential error messages, and the observation made above, carefully reason about the following:\nPlease respond with EXACTLY ONE of the following:\n- The word 'REGENERATE' followed immediately by new Python code in a fenced code block (```python...```) if you want to modify the code.\n- The word 'FINISH' if the task appears to be complete",
+        }
     )
     # collapse the last message
-    multi_turn_decision_prompt[-1]["content"] = collapse_text_image_inputs(multi_turn_decision_prompt[-1]["content"])
+    multi_turn_decision_prompt[-1]["content"] = collapse_text_image_inputs(
+        multi_turn_decision_prompt[-1]["content"]
+    )
     return multi_turn_decision_prompt
 
 
@@ -297,13 +335,21 @@ def _build_multi_turn_decision_prompt(
                 "executed):"
             )
         multi_turn_decision_prompt[-1]["content"].append(
-            {"type": "text", "text": f"{feedback_header}\n{visual_differencing_feedback}"}
+            {
+                "type": "text",
+                "text": f"{feedback_header}\n{visual_differencing_feedback}",
+            }
         )
     multi_turn_decision_prompt[-1]["content"].append(
-        {"type": "text", "text": "Based on the code output, potential error messages, and the observation made above, carefully reason about the following:\nPlease respond with EXACTLY ONE of the following:\n- The word 'REGENERATE' followed immediately by new Python code in a fenced code block (```python...```) if you want to modify the code.\n- The word 'FINISH' if the task appears to be complete"}
+        {
+            "type": "text",
+            "text": "Based on the code output, potential error messages, and the observation made above, carefully reason about the following:\nPlease respond with EXACTLY ONE of the following:\n- The word 'REGENERATE' followed immediately by new Python code in a fenced code block (```python...```) if you want to modify the code.\n- The word 'FINISH' if the task appears to be complete",
+        }
     )
     # collapse the last message
-    multi_turn_decision_prompt[-1]["content"] = collapse_text_image_inputs(multi_turn_decision_prompt[-1]["content"])
+    multi_turn_decision_prompt[-1]["content"] = collapse_text_image_inputs(
+        multi_turn_decision_prompt[-1]["content"]
+    )
     return multi_turn_decision_prompt
 
 
@@ -323,7 +369,8 @@ def _parse_multi_turn_decision(content: str) -> tuple[str, str | None]:
 
 
 def _get_visual_feedback(
-    env, use_wrist_camera: bool = False,
+    env,
+    use_wrist_camera: bool = False,
 ) -> tuple[str | list[str] | None, Image.Image | list[Image.Image] | None]:
     """Get visual feedback from the environment.
 
@@ -413,44 +460,67 @@ def _save_trial_artifacts(
     # Save initial ensemble data if provided
     if ensemble_data:
         if ensemble_data.get("ensemble_candidates_txt"):
-            (trial_dir / "ensemble_candidates.txt").write_text(ensemble_data["ensemble_candidates_txt"])
+            (trial_dir / "ensemble_candidates.txt").write_text(
+                ensemble_data["ensemble_candidates_txt"]
+            )
         if ensemble_data.get("ensemble_synthesis_txt"):
-            (trial_dir / "ensemble_synthesis.txt").write_text(ensemble_data["ensemble_synthesis_txt"])
+            (trial_dir / "ensemble_synthesis.txt").write_text(
+                ensemble_data["ensemble_synthesis_txt"]
+            )
 
     # Save multi-turn ensemble data (one file per regeneration)
     if multiturn_ensemble_data:
         for entry in multiturn_ensemble_data:
             regen_num = entry.get("regeneration", 0)
             if entry.get("ensemble_candidates_txt"):
-                (trial_dir / f"ensemble_candidates_regen_{regen_num:02d}.txt").write_text(
-                    entry["ensemble_candidates_txt"]
-                )
+                (
+                    trial_dir / f"ensemble_candidates_regen_{regen_num:02d}.txt"
+                ).write_text(entry["ensemble_candidates_txt"])
             if entry.get("ensemble_synthesis_txt"):
-                (trial_dir / f"ensemble_synthesis_regen_{regen_num:02d}.txt").write_text(
-                    entry["ensemble_synthesis_txt"]
-                )
+                (
+                    trial_dir / f"ensemble_synthesis_regen_{regen_num:02d}.txt"
+                ).write_text(entry["ensemble_synthesis_txt"])
 
     i = 0
     (trial_dir / "prompts_and_responses").mkdir(parents=True, exist_ok=True)
     for response in all_responses:
         if "task_seg_description" in response:
-            (trial_dir / "prompts_and_responses" / "task_seg_description.txt").write_text(response["task_seg_description"])
+            (
+                trial_dir / "prompts_and_responses" / "task_seg_description.txt"
+            ).write_text(response["task_seg_description"])
         if "task_seg_prompt" in response:
-            (trial_dir / "prompts_and_responses" / "task_seg_prompt.txt").write_text(str(response["task_seg_prompt"]))
+            (trial_dir / "prompts_and_responses" / "task_seg_prompt.txt").write_text(
+                str(response["task_seg_prompt"])
+            )
         if "initial_prompt" in response:
             try:
-                initial_prompt_content = response["initial_prompt"][-1]["content"][0]["text"]
+                initial_prompt_content = response["initial_prompt"][-1]["content"][0][
+                    "text"
+                ]
                 if isinstance(initial_prompt_content, list):
                     initial_prompt_content = "\n".join(map(str, initial_prompt_content))
-                (trial_dir / "prompts_and_responses" / "initial_prompt.txt").write_text(str(initial_prompt_content))
+                (trial_dir / "prompts_and_responses" / "initial_prompt.txt").write_text(
+                    str(initial_prompt_content)
+                )
             except Exception as e:
                 print(f"Error saving initial_prompt: {e}")
-        if "multi_turn_prompt" in response and response["multi_turn_prompt"] is not None:
+        if (
+            "multi_turn_prompt" in response
+            and response["multi_turn_prompt"] is not None
+        ):
             try:
-                multi_turn_prompt_content = response["multi_turn_prompt"][-1]["content"][0]["text"]
+                multi_turn_prompt_content = response["multi_turn_prompt"][-1][
+                    "content"
+                ][0]["text"]
                 if isinstance(multi_turn_prompt_content, list):
-                    multi_turn_prompt_content = "\n".join(map(str, multi_turn_prompt_content))
-                (trial_dir / "prompts_and_responses" / f"multi_turn_prompt_{i:02d}.txt").write_text(str(multi_turn_prompt_content))
+                    multi_turn_prompt_content = "\n".join(
+                        map(str, multi_turn_prompt_content)
+                    )
+                (
+                    trial_dir
+                    / "prompts_and_responses"
+                    / f"multi_turn_prompt_{i:02d}.txt"
+                ).write_text(str(multi_turn_prompt_content))
             except Exception as e:
                 print(f"Error saving multi_turn_prompt_{i}: {e}")
             i += 1
@@ -460,9 +530,11 @@ def _save_trial_artifacts(
     return code_path
 
 
-
 def _print_and_save_summary(
-    summaries: list[TrialSummary], args: LaunchArgs, config: dict[str, Any], start_time: float
+    summaries: list[TrialSummary],
+    args: LaunchArgs,
+    config: dict[str, Any],
+    start_time: float,
 ) -> None:
     """Compute statistics, print them, and save to a file.
 
@@ -486,7 +558,9 @@ def _print_and_save_summary(
             print(f"Code saved to {summary.code_path}")
         success_count += int(summary.success)
         total_reward += summary.reward
-        task_completed_count += int(summary.task_completed is not None and summary.task_completed)
+        task_completed_count += int(
+            summary.task_completed is not None and summary.task_completed
+        )
         total_code_blocks += summary.num_code_blocks
         total_regenerations += summary.num_regenerations
         total_finishes += summary.num_finishes
@@ -513,7 +587,9 @@ def _print_and_save_summary(
             .strip()
         )
         git_dirty = (
-            subprocess.check_output(["git", "status", "--porcelain"], stderr=subprocess.STDOUT)
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], stderr=subprocess.STDOUT
+            )
             .decode("utf-8")
             .strip()
         )
@@ -527,9 +603,11 @@ def _print_and_save_summary(
     elapsed_time = time.time() - start_time
     print("\nSummary Statistics:")
     print(f"Model: {args.model}")
-    print(f"Visual Differencing Model: {args.visual_differencing_model}") if config[
-        "use_img_differencing"
-    ] else ""
+    (
+        print(f"Visual Differencing Model: {args.visual_differencing_model}")
+        if config["use_img_differencing"]
+        else ""
+    )
     print(f"Config Path: {args.config_path}")
     print(f"Git Commit: {git_commit} (Dirty: {is_dirty})")
     print(f"Total number of trials: {executed_trials}")
@@ -545,9 +623,13 @@ def _print_and_save_summary(
     if config["output_dir"]:
         with open(Path(config["output_dir"]) / "summaries.txt", "w") as f:
             f.write(f"Model: {args.model}\n")
-            f.write(f"Visual Differencing Model: {args.visual_differencing_model}\n") if config[
-                "use_img_differencing"
-            ] else ""
+            (
+                f.write(
+                    f"Visual Differencing Model: {args.visual_differencing_model}\n"
+                )
+                if config["use_img_differencing"]
+                else ""
+            )
             f.write(f"Config Path: {args.config_path}\n")
             f.write(f"Git Commit: {git_commit} (Dirty: {is_dirty})\n")
             f.write(f"Total number of trials: {executed_trials}\n")

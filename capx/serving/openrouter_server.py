@@ -110,7 +110,7 @@ def create_app(api_key: str, base_url: str, async_client: bool = True) -> FastAP
                 # native model identifier (e.g. "google/gemini-2.5-pro-preview").
                 model = client_kwargs.get("model", "")
                 if model.startswith("openrouter/"):
-                    client_kwargs["model"] = model[len("openrouter/"):]
+                    client_kwargs["model"] = model[len("openrouter/") :]
 
                 if request.stream:
                     client_kwargs["stream"] = True
@@ -122,7 +122,9 @@ def create_app(api_key: str, base_url: str, async_client: bool = True) -> FastAP
                             yield f"data: {data}\n\n"
                         yield "data: [DONE]\n\n"
 
-                    return StreamingResponse(event_stream(), media_type="text/event-stream")
+                    return StreamingResponse(
+                        event_stream(), media_type="text/event-stream"
+                    )
 
                 client_kwargs["stream"] = False
                 response = await client.chat.completions.create(**client_kwargs)
@@ -137,7 +139,10 @@ def create_app(api_key: str, base_url: str, async_client: bool = True) -> FastAP
                 ]
 
                 return ChatCompletionResponse(
-                    id=response.id, created=response.created, model=response.model, choices=choices
+                    id=response.id,
+                    created=response.created,
+                    model=response.model,
+                    choices=choices,
                 )
 
             except Exception as e:
@@ -152,7 +157,7 @@ def create_app(api_key: str, base_url: str, async_client: bool = True) -> FastAP
 
                 model = client_kwargs.get("model", "")
                 if model.startswith("openrouter/"):
-                    client_kwargs["model"] = model[len("openrouter/"):]
+                    client_kwargs["model"] = model[len("openrouter/") :]
 
                 client_kwargs["stream"] = False
 
@@ -168,7 +173,10 @@ def create_app(api_key: str, base_url: str, async_client: bool = True) -> FastAP
                 ]
 
                 return ChatCompletionResponse(
-                    id=response.id, created=response.created, model=response.model, choices=choices
+                    id=response.id,
+                    created=response.created,
+                    model=response.model,
+                    choices=choices,
                 )
 
             except Exception as e:
@@ -186,7 +194,7 @@ def main(
     api_key: str | None = None,
     host: str = "0.0.0.0",
     port: int = 8111,
-    base_url: str = "https://openrouter.ai/api/v1/",
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
     async_client: bool = True,
 ):
     """
