@@ -48,9 +48,6 @@ class TestAgentArgs(LaunchArgs):
     listen_port: int = 8765
     """Port to listen on."""
 
-    auth_token: str | None = None
-    """Authentication token expected from client (optional)."""
-
     agent_id: str = "test-agent-server"
     """Server identifier."""
 
@@ -108,65 +105,16 @@ class TestAgentServer:
             websocket: WebSocket connection object
         """
         agent_id = None
-        authenticated = False
 
         try:
-            # Wait for authentication message (CapProto protocol)
-            logger.info("Waiting for authentication message...")
-            data = await websocket.recv()
-            message = json.loads(data)
-
-            if message.get("type") == "auth":
-                token = message.get("token")
-                agent_id = message.get("agent_id", "unknown")
-
-                # Validate token if configured
-                if self.args.auth_token:
-                    if token == self.args.auth_token:
-                        authenticated = True
-                        logger.info(f"✓ Client {agent_id} authenticated successfully")
-
-                        # Send auth response
-                        await websocket.send(
-                            json.dumps(
-                                {
-                                    "type": "auth_response",
-                                    "status": "accepted",
-                                    "message": "Authentication successful",
-                                }
-                            )
-                        )
-                    else:
-                        logger.warning(
-                            f"✗ Client {agent_id} authentication failed (invalid token)"
-                        )
-                        await websocket.send(
-                            json.dumps(
-                                {
-                                    "type": "auth_response",
-                                    "status": "rejected",
-                                    "message": "Invalid authentication token",
-                                }
-                            )
-                        )
-                        return
-                else:
-                    # No token required, accept all
-                    authenticated = True
-                    logger.info(f"✓ Client {agent_id} accepted (no auth required)")
-
-                    await websocket.send(
-                        json.dumps(
-                            {
-                                "type": "auth_response",
-                                "status": "accepted",
-                                "message": "Authentication successful",
-                            }
-                        )
-                    )
+            # Extract agent_id from URL query parameters
+            path = websocket.request.path if hasattr(websocket, "request") else ""
+            if "agent_id=" in path:
+                agent_id = path.split("agent_id=")[1].split("&")[0]
             else:
-                logger.error(f"Expected auth message, got type: {message.get('type')}")
-                return
+                agent_id = "unknown-client"
+
+            logger.info(f"✓ Client {agent_id} connected")
 
             # Register client
             self.clients[agent_id] = websocket

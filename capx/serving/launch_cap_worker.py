@@ -51,11 +51,8 @@ class CapWorkerArgs(LaunchArgs):
     """
 
     # WebSocket connection configuration (CapWorker specific)
-    agent_url: str = "ws://localhost:8765/agent"
+    agent_url: str = "ws://localhost:8765"
     """WebSocket URL of the agent server to connect to."""
-
-    auth_token: str | None = None
-    """Authentication token for WebSocket connection (optional)."""
 
     agent_id: str = "cap-worker"
     """Agent ID to identify this worker to the server."""
@@ -134,65 +131,18 @@ class CapWorker:
         return message
 
     async def connect(self):
-        """Connect to the agent server via WebSocket with protocol headers.
+        """Connect to the agent server via WebSocket.
 
         This method:
         1. Establishes WebSocket connection
-        2. Sends authentication message if configured (per CapProto protocol)
-        3. Waits for connection acceptance
+        2. Adds agent_id to URL query parameters
         """
         logger.info(f"Connecting to agent server at {self.config.args.agent_url}")
 
         try:
-            # Add agent_id to URL query parameters if not present
-            agent_url = self.config.args.agent_url
-            if "agent_id=" not in agent_url:
-                separator = "&" if "?" in agent_url else "?"
-                agent_url = (
-                    f"{agent_url}{separator}agent_id={self.config.args.agent_id}"
-                )
-
             # Connect to WebSocket server
-            self.websocket = await ws_connect(agent_url)
+            self.websocket = await ws_connect(self.config.args.agent_url)
             logger.info("✓ WebSocket connection established")
-
-            # Send authentication message if token is configured (per CapProto protocol)
-            if self.config.args.auth_token:
-                auth_message = {
-                    "type": "auth",
-                    "token": self.config.args.auth_token,
-                    "agent_id": self.config.args.agent_id,
-                }
-                await self.websocket.send(json.dumps(auth_message))
-                logger.debug("Sent authentication message")
-
-                # Wait for authentication response
-                try:
-                    import asyncio
-
-                    response_data = await asyncio.wait_for(
-                        self.websocket.recv(), timeout=10.0
-                    )
-                    response = json.loads(response_data)
-
-                    if response.get("type") == "auth_response":
-                        if response.get("status") == "accepted":
-                            logger.info("✓ Authentication successful")
-                        else:
-                            logger.error("✗ Authentication failed")
-                            await self.websocket.close()
-                            self.websocket = None
-                            raise RuntimeError("Authentication rejected by server")
-                    else:
-                        logger.warning(
-                            f"Unexpected response type: {response.get('type')}"
-                        )
-
-                except asyncio.TimeoutError:
-                    logger.warning("Authentication response timeout, continuing anyway")
-                except json.JSONDecodeError:
-                    logger.warning("Invalid authentication response format")
-
             logger.info(f"✓ Connected to agent server as {self.config.args.agent_id}")
 
         except Exception as e:
