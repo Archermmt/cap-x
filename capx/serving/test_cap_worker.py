@@ -1,24 +1,20 @@
 """Test script for CapWorker - simulates an Agent server.
 
 This script creates a WebSocket server that:
-1. Implements CapProto protocol for authentication
-2. Receives messages from CapWorker (query_code, query_decision)
-3. Calls LLM service via _query_model from trial.py
-4. Sends responses back to CapWorker
+1. Receives query_model messages from CapWorker
+2. Calls LLM service via OpenAI API
+3. Sends responses back to CapWorker
 
 Usage::
 
     uv run --no-sync --active python capx/serving/test_cap_worker.py \\
-        --agent-url ws://localhost:8765/agent \\
         --config-path env_configs/cube_stack/franka_robosuite_cube_stack.yaml
 """
 
 from __future__ import annotations
-
 import asyncio
 import json
 import logging
-import signal
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,7 +23,6 @@ import websockets
 from websockets.asyncio.server import serve as ws_serve
 
 from capx.envs.launch import LaunchArgs
-from capx.llm.client import ModelQueryArgs, query_model as _query_model
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +37,9 @@ class TestAgentArgs(LaunchArgs):
     """Command-line arguments for TestAgent server."""
 
     # WebSocket server configuration
-    listen_host: str = "localhost"
-    """Host to listen on."""
-
-    listen_port: int = 8765
-    """Port to listen on."""
-
+    agent_host: str = "localhost"
+    agent_port: int = 8765
     agent_id: str = "test-agent-server"
-    """Server identifier."""
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +67,8 @@ class TestAgentServer:
 
     This server:
     1. Listens for WebSocket connections
-    2. Implements CapProto authentication
-    3. Receives query_code and query_decision messages
-    4. Calls LLM service and returns results
+    2. Receives query_model messages
+    3. Calls LLM service via OpenAI API and returns results
     """
 
     def __init__(self, config: TestAgentConfig):
@@ -88,14 +77,29 @@ class TestAgentServer:
         Args:
             config: Server configuration including args and config_dict
         """
+        from openai import OpenAI
+        from capx.serving.openrouter_server import _load_api_keys
+
         self.config = config
         self.args = config.args
         self.config_dict = config.config_dict
         self.clients = {}  # Track connected clients by agent_id
         self.server = None
 
+        # Initialize OpenAI client
+        api_key = _load_api_keys(".openrouterkey")[0]
+        default_headers = {
+            "HTTP-Referer": "https://github.com/nvidia-gear/CaP-X",
+            "X-Title": "CaP-X",
+        }
+        self.llm_client = OpenAI(
+            api_key=api_key,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            default_headers=default_headers,
+        )
+
         logger.info(
-            f"TestAgentServer initialized, will listen on {config.args.listen_host}:{config.args.listen_port}"
+            f"TestAgentServer initialized, will listen on {config.args.agent_host}:{config.args.agent_port}"
         )
 
     async def handle_client(self, websocket):
@@ -130,20 +134,8 @@ class TestAgentServer:
 
                     logger.info(f"Received message from {agent_id}: {msg_type}")
 
-                    if msg_type == "query_code":
-                        await self._handle_query_code(websocket, message)
-
-                    elif msg_type == "query_decision":
-                        await self._handle_query_decision(websocket, message)
-
-                    elif msg_type == "ping":
-                        await websocket.send(json.dumps({"type": "pong"}))
-
-                    elif msg_type == "task_result":
-                        logger.info(
-                            f"Received task result: trial={message.get('trial')}, success={message.get('success')}"
-                        )
-
+                    if msg_type == "query_model":
+                        await self._handle_query_model(websocket, message["prompt"])
                     else:
                         logger.warning(f"Unknown message type: {msg_type}")
 
@@ -170,81 +162,27 @@ class TestAgentServer:
                     f"Client {agent_id} unregistered. Remaining clients: {len(self.clients)}"
                 )
 
-    async def _handle_query_code(self, websocket, message: dict[str, Any]):
-        """Handle code generation query.
+    async def _handle_query_model(self, websocket, payload: dict):
+        """Handle query_model request from CapWorker.
 
         Args:
             websocket: WebSocket connection
-            message: Query message containing prompt
+            prompt: Prompt messages for the LLM
         """
+
         try:
-            prompt = message.get("prompt", [])
-            task_description = message.get("task_description", "")
-
-            logger.info(
-                f"Processing code generation query (prompt length: {len(prompt)})"
-            )
-
-            # Call LLM service
-            content = await self._call_llm(prompt)
-
-            # Extract reasoning if available
-            reasoning = content.get("reasoning")
-            code_content = content.get("content", "")
-
-            # Send response
-            response = {
-                "type": "code_response",
-                "content": code_content,
-                "reasoning": reasoning,
-            }
-
-            await websocket.send(json.dumps(response))
-            logger.info("Code response sent to client")
-
+            response = await self.llm_client.chat.completions.create(**payload)
+            print(f"[TMINFO] Response: {response}", flush=True)
+            results = {"type": "query_model_response"}
+            try:
+                results["content"] = response.choices[0].message.content
+                results["reasoning"] = response.choices[0].message.reasoning
+            except (KeyError, IndexError) as exc:
+                raise RuntimeError(f"Unexpected response format: {response}") from exc
+            await websocket.send(json.dumps(results))
+            logger.info("Query model response sent to client")
         except Exception as e:
-            logger.error(f"Error handling query_code: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-            # Send error response
-            await websocket.send(
-                json.dumps({"type": "code_response", "content": "", "error": str(e)})
-            )
-
-    async def _handle_query_decision(self, websocket, message: dict[str, Any]):
-        """Handle multi-turn decision query.
-
-        Args:
-            websocket: WebSocket connection
-            message: Query message containing prompt
-        """
-        try:
-            prompt = message.get("prompt", [])
-            task_description = message.get("task_description", "")
-
-            logger.info(f"Processing decision query (prompt length: {len(prompt)})")
-
-            # Call LLM service
-            content = await self._call_llm(prompt)
-
-            # Extract reasoning if available
-            reasoning = content.get("reasoning")
-            decision_content = content.get("content", "")
-
-            # Send response
-            response = {
-                "type": "decision_response",
-                "content": decision_content,
-                "reasoning": reasoning,
-            }
-
-            await websocket.send(json.dumps(response))
-            logger.info("Decision response sent to client")
-
-        except Exception as e:
-            logger.error(f"Error handling query_decision: {e}")
+            logger.error(f"Error handling query_model: {e}")
             import traceback
 
             traceback.print_exc()
@@ -252,61 +190,20 @@ class TestAgentServer:
             # Send error response
             await websocket.send(
                 json.dumps(
-                    {"type": "decision_response", "content": "", "error": str(e)}
+                    {"type": "query_model_response", "content": "", "error": str(e)}
                 )
             )
 
-    async def _call_llm(self, prompt: list[dict]) -> dict[str, Any]:
-        """Call LLM service using _query_model from trial.py.
-
-        Args:
-            prompt: Prompt messages for the LLM
-
-        Returns:
-            Dictionary with 'content' and optional 'reasoning'
-        """
-        # Build ModelQueryArgs from config
-        model_args = ModelQueryArgs(
-            model=self.args.model,
-            server_url=self.args.server_url,
-            api_key=self.args.api_key,
-            temperature=self.args.temperature,
-            max_tokens=self.args.max_tokens,
-            reasoning_effort=getattr(self.args, "reasoning_effort", "medium"),
-            debug=False,
-        )
-
-        logger.info(
-            f"Calling LLM: model={model_args.model}, server={model_args.server_url}"
-        )
-
-        # Run synchronous _query_model in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, lambda: _query_model(model_args, prompt)
-        )
-
-        logger.info(
-            f"LLM call completed (response length: {len(result.get('content', ''))})"
-        )
-
-        return result
-
     async def start(self):
-        """Start the WebSocket server."""
-        host = self.args.listen_host
-        port = self.args.listen_port
-
-        logger.info(f"Starting TestAgentServer on ws://{host}:{port}")
+        """Start WebSocket server."""
 
         # Create WebSocket server
-        self.server = await ws_serve(
-            self.handle_client,
-            host,
-            port,
-        )
+        host = self.args.agent_host
+        port = self.args.agent_port
+        self.server = await ws_serve(self.handle_client, host, port)
 
-        logger.info(f"✓ TestAgentServer listening on ws://{host}:{port}")
+        logger.info(f"✓ WebSocket server started on ws://{host}:{port}")
+        logger.info("✓ TestAgentServer is ready!")
 
         # Keep server running
         try:
