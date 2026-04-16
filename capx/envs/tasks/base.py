@@ -95,13 +95,17 @@ class CodeExecutionEnvBase(Env):
             cfg.low_level, cfg.privileged, cfg.enable_render, cfg.viser_debug
         )  # type: ignore[assignment]
         # Create APIs once; maximize sharing inside a worker via lru_cache in get_api
-        self._apis: dict[str, ApiBase] = {n: get_api(n)(self.low_level_env) for n in cfg.apis}
+        self._apis: dict[str, ApiBase] = {
+            n: get_api(n)(self.low_level_env) for n in cfg.apis
+        }
         # for api in self._apis.values():
         #     api.set_env(self.low_level_env)
         self._executor = SimpleExecutor(self.low_level_env, self._apis)
         self._step_count = 0
         self.action_space = spaces.Text(max_length=4096)
-        self.observation_space = spaces.Dict({"task_prompt": spaces.Text(max_length=4096)})
+        self.observation_space = spaces.Dict(
+            {"task_prompt": spaces.Text(max_length=4096)}
+        )
 
         # Prompt priority: YAML config (cfg.prompt) overrides the class attribute (self.prompt).
         # The class attribute serves as the single source of truth for the default task prompt.
@@ -112,12 +116,13 @@ class CodeExecutionEnvBase(Env):
         # Oracle code: YAML config overrides class attribute
         if cfg.oracle_code is not None:
             self.oracle_code = cfg.oracle_code
-        self._system_prompt = (
-            "You are a helpful assistant that generates Python code to directly solve the task."
-        )
+        self._system_prompt = "You are a helpful assistant that generates Python code to directly solve the task."
         self._full_prompt = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": [{"type": "text", "text": self._get_complete_prompt()}]},
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": self._get_complete_prompt()}],
+            },
         ]
 
         # Persistent execution namespace to retain variables across steps
@@ -205,7 +210,11 @@ class CodeExecutionEnvBase(Env):
         self._exec_globals = g
 
     def _build_low_level(
-        self, src: Env | str, privileged: bool = False, enable_render: bool = True, viser_debug: bool = False
+        self,
+        src: Env | str,
+        privileged: bool = False,
+        enable_render: bool = True,
+        viser_debug: bool = False,
     ) -> BaseEnv:
         """
         Builds the low level environment from the given source.
@@ -221,7 +230,12 @@ class CodeExecutionEnvBase(Env):
                     return cfg_instantiate(cfg)  # type: ignore[no-any-return]
                 return cfg  # type: ignore[return-value]
             else:
-                return get_env(src, privileged=privileged, enable_render=enable_render, viser_debug=viser_debug)
+                return get_env(
+                    src,
+                    privileged=privileged,
+                    enable_render=enable_render,
+                    viser_debug=viser_debug,
+                )
         return src
 
     def _get_observation(self) -> dict[str, Any]:
@@ -234,6 +248,31 @@ class CodeExecutionEnvBase(Env):
         obs = self.low_level_env.get_observation()
         obs.update({"full_prompt": self._full_prompt})
         return obs
+
+    def change_goal(self, goal: str) -> None:
+        """
+        Changes the goal of the environment.
+        Args:
+            goal: The new goal.
+        """
+
+        lines = self._task_prompt.splitlines()
+        if any(l.startswith("Goal:") for l in lines):
+            new_lines = []
+            for ln in lines:
+                if ln.startswith("Goal:"):
+                    ln = "Goal: " + goal
+                new_lines.append(ln)
+            self._task_prompt = "\n".join(new_lines)
+        else:
+            self._task_prompt = goal
+        self._full_prompt = [
+            {"role": "system", "content": self._system_prompt},
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": self._get_complete_prompt()}],
+            },
+        ]
 
     # ---- Public facing methods ----
     # Public facing methods that should be consistent for all environments
@@ -260,7 +299,9 @@ class CodeExecutionEnvBase(Env):
         info.update({"task_prompt": self._task_prompt})
         return obs, info
 
-    def step(self, action: str) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: str
+    ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         """
         Default implementation: execute code with helpers, report reward and logs.
         Subclasses can override hooks to customize inputs and helper bindings.
@@ -270,7 +311,10 @@ class CodeExecutionEnvBase(Env):
         obs = self._get_observation()
         # Force viser 3D view update after code execution so the scene
         # reflects the final state (sim substep updates may have been skipped).
-        if hasattr(self.low_level_env, "viser_debug") and self.low_level_env.viser_debug:
+        if (
+            hasattr(self.low_level_env, "viser_debug")
+            and self.low_level_env.viser_debug
+        ):
             self.low_level_env._update_viser_server()
         reward = self.compute_reward()
         if hasattr(self.low_level_env, "task_completed"):
@@ -284,7 +328,9 @@ class CodeExecutionEnvBase(Env):
         )  # type: ignore[arg-type]
 
         if not exec_result["ok"] and exec_result["stderr"] == "":
-            print("Uhh we shouldn't be here, sandbox return code 1 but stderr appears empty")
+            print(
+                "Uhh we shouldn't be here, sandbox return code 1 but stderr appears empty"
+            )
             # import pdb; pdb.set_trace()
             raise RuntimeError("Sandbox return code 1 but stderr appears empty")
 

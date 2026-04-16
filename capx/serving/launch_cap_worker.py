@@ -13,13 +13,13 @@ Usage::
 
 from __future__ import annotations
 
-
 import asyncio
 import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 import tyro
+from pathlib import Path
 import websockets
 from websockets.asyncio.client import connect as ws_connect
 
@@ -156,7 +156,9 @@ class CapWorker:
             self.websocket = None
             logger.info("Disconnected from agent server")
 
-    async def run_trial(self, trial: int = 0, multi_turn_prompt: str | None = None):
+    async def run_trial(
+        self, task_goal: str, trial: int = 0, multi_turn_prompt: str | None = None
+    ):
         """Execute a single trial by communicating with the agent.
 
         This method implements the core logic from _run_single_trial but
@@ -169,14 +171,9 @@ class CapWorker:
         llm_client.query_model = self.query_model
         from capx.envs.runner import _run_trial_with_retries
 
-        partial_artifacts: dict[str, Any] = {}
+        self.env.change_goal(task_goal)
         results = _run_trial_with_retries(
-            self.env,
-            trial,
-            self.args,
-            self.worker_config,
-            multi_turn_prompt,
-            partial_artifacts=partial_artifacts,
+            self.env, trial, self.args, self.worker_config, multi_turn_prompt
         )
         print(f"[TMINFO] get results {results}")
         return results
@@ -196,7 +193,9 @@ class CapWorker:
         Returns:
             Model response content
         """
-        import asyncio
+
+        print(f"[TMINFO] query_model with args {args}, prompt {prompt}", flush=True)
+        raise Exception("stop here!!")
 
         async def _async_query():
             if self.websocket is None:
@@ -259,6 +258,13 @@ class CapWorker:
         if self.env_factory is None:
             raise RuntimeError("Environment not initialized. Provide config_path.")
         self.env = instantiate(self.env_factory)
+        # parse output dir
+        if self.worker_config["output_dir"]:
+            parts = self.worker_config["output_dir"].split("/")
+            parts.insert(-1, str(self.args.model).replace("/", "_"))
+            new_out_dir = "/".join(parts)
+            Path(new_out_dir).mkdir(parents=True, exist_ok=True)
+            self.worker_config["output_dir"] = new_out_dir
 
         # Connect to agent server
         await self.connect()
@@ -273,7 +279,6 @@ class CapWorker:
                     # Wait for incoming message
                     message_data = await self.websocket.recv()
                     message = json.loads(message_data)
-                    print(f"[TMINFO] received message {message}", flush=True)
                     msg_type = message.get("type", "")
 
                     logger.info(f"Received message type: {msg_type}")
@@ -281,6 +286,7 @@ class CapWorker:
                     if msg_type == "cap_task":
                         # Execute trial when receiving cap_task message
                         task_count += 1
+                        task_goal = message["content"]
                         trial_num = message.get("trial", task_count - 1)
                         multi_turn_prompt = message.get("multi_turn_prompt")
 
@@ -288,7 +294,8 @@ class CapWorker:
 
                         try:
                             result = await self.run_trial(
-                                trial=trial_num,
+                                task_goal,
+                                trial_num,
                                 multi_turn_prompt=multi_turn_prompt,
                             )
 

@@ -125,6 +125,14 @@ class TestAgentServer:
             logger.info(
                 f"Client {agent_id} registered. Total clients: {len(self.clients)}"
             )
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "cap_task",
+                        "content": "Pick up the green cube and gently stack it on top of the red cube, then release it.",
+                    }
+                )
+            )
 
             # Main message loop
             async for message_data in websocket:
@@ -172,7 +180,6 @@ class TestAgentServer:
 
         try:
             response = await self.llm_client.chat.completions.create(**payload)
-            print(f"[TMINFO] Response: {response}", flush=True)
             results = {"type": "query_model_response"}
             try:
                 results["content"] = response.choices[0].message.content
