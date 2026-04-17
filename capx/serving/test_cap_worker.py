@@ -54,12 +54,12 @@ class TestAgentConfig:
     args: TestAgentArgs
     """Command-line arguments."""
 
-    config_dict: dict[str, Any] = None
+    config: dict[str, Any] = None
     """Configuration dictionary loaded from YAML."""
 
     def __post_init__(self):
-        if self.config_dict is None:
-            self.config_dict = {}
+        if self.config is None:
+            self.config = {}
 
 
 class TestAgentServer:
@@ -77,12 +77,12 @@ class TestAgentServer:
         Args:
             config: Server configuration including args and config_dict
         """
-        from openai import OpenAI
+        from openai import AsyncOpenAI
         from capx.serving.openrouter_server import _load_api_keys
 
         self.config = config
         self.args = config.args
-        self.config_dict = config.config_dict
+        self.agent_config = config.config
         self.clients = {}  # Track connected clients by agent_id
         self.server = None
 
@@ -92,7 +92,7 @@ class TestAgentServer:
             "HTTP-Referer": "https://github.com/nvidia-gear/CaP-X",
             "X-Title": "CaP-X",
         }
-        self.llm_client = OpenAI(
+        self.llm_client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
             default_headers=default_headers,
@@ -111,14 +111,17 @@ class TestAgentServer:
         agent_id = None
 
         try:
-            # Extract agent_id from URL query parameters
-            path = websocket.request.path if hasattr(websocket, "request") else ""
-            if "agent_id=" in path:
-                agent_id = path.split("agent_id=")[1].split("&")[0]
-            else:
-                agent_id = "unknown-client"
+            # Extract agent_id from headers
+            headers = (
+                dict(websocket.request.headers) if hasattr(websocket, "request") else {}
+            )
+            agent_id = headers.get("agent-id", "unknown-client")
+            client_type = headers.get("client-type", "unknown")
+            cap_tag = headers.get("cap-tag", "")
 
-            logger.info(f"✓ Client {agent_id} connected")
+            logger.info(
+                f"✓ Client {agent_id} connected (type: {client_type}, tag: {cap_tag})"
+            )
 
             # Register client
             self.clients[agent_id] = websocket
@@ -170,7 +173,7 @@ class TestAgentServer:
                     f"Client {agent_id} unregistered. Remaining clients: {len(self.clients)}"
                 )
 
-    async def _handle_query_model(self, websocket, payload: dict):
+    async def _handle_query_model(self, websocket, prompt: list[dict]):
         """Handle query_model request from CapWorker.
 
         Args:
@@ -178,12 +181,18 @@ class TestAgentServer:
             prompt: Prompt messages for the LLM
         """
 
+        payload = {
+            "model": self.args.model,
+            "temperature": self.args.temperature,
+            "max_tokens": self.args.max_tokens,
+            "messages": prompt,
+        }
+
         try:
             response = await self.llm_client.chat.completions.create(**payload)
             results = {"type": "query_model_response"}
             try:
                 results["content"] = response.choices[0].message.content
-                results["reasoning"] = response.choices[0].message.reasoning
             except (KeyError, IndexError) as exc:
                 raise RuntimeError(f"Unexpected response format: {response}") from exc
             await websocket.send(json.dumps(results))
@@ -239,14 +248,14 @@ def main(args: TestAgentArgs) -> None:
     from capx.utils.launch_utils import _load_config
 
     # Load environment configuration (needed for model settings)
-    _, config_dict, _ = _load_config(args)
+    _, config, _ = _load_config(args)
+    if config.get("model"):
+        args.model = config["model"]
+    if config.get("visual_differencing_model"):
+        args.visual_differencing_model = config["visual_differencing_model"]
 
     # Create TestAgentConfig
-    server_config = TestAgentConfig(
-        args=args,
-        config_dict=config_dict,
-    )
-
+    server_config = TestAgentConfig(args=args, config=config)
     # Create and start TestAgentServer
     server = TestAgentServer(server_config)
 

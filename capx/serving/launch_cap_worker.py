@@ -133,15 +133,22 @@ class CapWorker:
         """Connect to the agent server via WebSocket.
 
         This method:
-        1. Establishes WebSocket connection
-        2. Adds agent_id to URL query parameters
+        1. Establishes WebSocket connection with custom headers
+        2. Adds agent_id and cap-related tags to identify this as a CapWorker client
         """
         agent_url = f"ws://{self.config.args.agent_host}:{self.config.args.agent_port}"
         logger.info(f"Connecting to agent server at {agent_url}")
 
         try:
-            # Connect to WebSocket server
-            self.websocket = await ws_connect(agent_url)
+            # Prepare headers to identify this as a CapWorker client
+            headers = {
+                "agent-id": self.config.args.agent_id,
+                "client-type": "cap-worker",
+                "cap-tag": "capx-robot-control",
+            }
+
+            # Connect to WebSocket server with headers
+            self.websocket = await ws_connect(agent_url, additional_headers=headers)
             logger.info("✓ WebSocket connection established")
             logger.info(f"✓ Connected to agent server as {self.config.args.agent_id}")
 
@@ -194,21 +201,12 @@ class CapWorker:
             Model response content
         """
 
-        print(f"[TMINFO] query_model with args {args}, prompt {prompt}", flush=True)
-        raise Exception("stop here!!")
-
         async def _async_query():
             if self.websocket is None:
                 raise RuntimeError("WebSocket not connected. Call start() first.")
 
             # Send prompt message
-            payload = {
-                "model": args.model,
-                "temperature": args.temperature,
-                "max_tokens": args.max_tokens,
-                "messages": prompt,
-            }
-            message = {"type": "query_model", "payload": payload}
+            message = {"type": "query_model", "prompt": prompt}
             await self._send_message(message)
             logger.info(f"Sent prompt to server (length: {len(prompt)})")
 
@@ -268,6 +266,19 @@ class CapWorker:
 
         # Connect to agent server
         await self.connect()
+        # Send extern tools
+        extern_tools = [
+            {
+                "name": "send_task_to_capworker",
+                "description": "Send a task instruction to CapWorker for execution. This tool should ONLY be called when you need to send a task to the CapWorker for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
+                "mockResponse": {
+                    "success": True,
+                    "message": "Task sent to CapWorker successfully",
+                },
+            }
+        ]
+        self.websocket.send(json.dumps({"type": "extern_tools", "tools": extern_tools}))
 
         try:
             # Main loop: wait for tasks from agent
@@ -377,13 +388,13 @@ def main(args: CapWorkerArgs) -> None:
 
     # Load environment configuration
     env_factory, config, _ = _load_config(args)
+    if config.get("model"):
+        args.model = config["model"]
+    if config.get("visual_differencing_model"):
+        args.visual_differencing_model = config["visual_differencing_model"]
 
     # Create CapWorkerConfig
-    worker_config = CapWorkerConfig(
-        args=args,
-        env_factory=env_factory,
-        config=config,
-    )
+    worker_config = CapWorkerConfig(args=args, env_factory=env_factory, config=config)
 
     # Create and start CapWorker
     worker = CapWorker(worker_config)
