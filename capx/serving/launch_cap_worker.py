@@ -99,6 +99,8 @@ class CapWorker:
         self.worker_config = config.config
         self.websocket = None
         self.env = None
+        self.message_queue = asyncio.Queue()  # Queue for storing received messages
+        self._message_receiver_task = None  # Background task for receiving messages
 
         agent_url = f"ws://{config.args.agent_host}:{config.args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
@@ -115,8 +117,12 @@ class CapWorker:
         await self.websocket.send(json.dumps(message))
         logger.debug(f"Sent to agent: {message.get('type')}")
 
-    async def _receive_message(self) -> dict[str, Any]:
+    async def _receive_message(self, expected_type: str = None) -> dict[str, Any]:
         """Receive a message from the agent via WebSocket.
+
+        Args:
+            expected_type: Expected message type. If specified, messages with different types
+                          will be put back into the queue.
 
         Returns:
             Received message as dictionary
@@ -124,10 +130,21 @@ class CapWorker:
         if self.websocket is None:
             raise RuntimeError("Not connected to agent server")
 
-        data = await self.websocket.recv()
-        message = json.loads(data)
-        logger.debug(f"Received from agent: {message.get('type')}")
-        return message
+        # Get message from queue
+        while True:
+            message = await self.message_queue.get()
+            msg_type = message.get("type", "")
+
+            # If no expected type or type matches, return the message
+            if expected_type is None or msg_type == expected_type:
+                logger.debug(f"Received from agent: {msg_type}")
+                return message
+            else:
+                # Put back into queue if type doesn't match
+                logger.debug(
+                    f"Message type '{msg_type}' doesn't match expected '{expected_type}', putting back"
+                )
+                await self.message_queue.put(message)
 
     async def connect(self):
         """Connect to the agent server via WebSocket.
@@ -158,10 +175,52 @@ class CapWorker:
 
     async def disconnect(self):
         """Disconnect from the agent server."""
+        # Cancel message receiver task
+        if self._message_receiver_task:
+            self._message_receiver_task.cancel()
+            try:
+                await self._message_receiver_task
+            except asyncio.CancelledError:
+                pass
+            self._message_receiver_task = None
+
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
             logger.info("Disconnected from agent server")
+
+    async def _message_receiver_loop(self):
+        """Background task to receive messages from WebSocket and put them into queue.
+
+        This loop continuously receives messages from the WebSocket connection
+        and places them into the message_queue for processing by other parts of the code.
+        """
+        try:
+            while True:
+                try:
+                    # Receive message from WebSocket
+                    data = await self.websocket.recv()
+                    message = json.loads(data)
+                    msg_type = message.get("type", "unknown")
+
+                    # Put message into queue
+                    await self.message_queue.put(message)
+                    logger.debug(f"Received message '{msg_type}' and put into queue")
+
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("WebSocket connection closed in receiver loop")
+                    break
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse message: {e}")
+                except Exception as e:
+                    logger.error(f"Error in message receiver loop: {e}")
+                    import traceback
+
+                    traceback.print_exc()
+                    break
+        except asyncio.CancelledError:
+            logger.info("Message receiver loop cancelled")
+            raise
 
     async def run_trial(
         self, task_goal: str, trial: int = 0, multi_turn_prompt: str | None = None
@@ -210,8 +269,8 @@ class CapWorker:
             await self._send_message(message)
             logger.info(f"Sent prompt to server (length: {len(prompt)})")
 
-            # Wait for response
-            response = await self._receive_message()
+            # Wait for response with expected type
+            response = await self._receive_message(expected_type="query_model_response")
             logger.info(f"Received response from server: {response.get('type')}")
 
             if response.get("type") == "query_model_response":
@@ -266,6 +325,11 @@ class CapWorker:
 
         # Connect to agent server
         await self.connect()
+
+        # Start background message receiver task
+        # self._message_receiver_task = asyncio.create_task(self._message_receiver_loop())
+        # logger.info("Started background message receiver task")
+
         # Send extern tools
         extern_tools = [
             {
@@ -278,7 +342,7 @@ class CapWorker:
                 },
             }
         ]
-        self.websocket.send(json.dumps({"type": "extern_tools", "tools": extern_tools}))
+        await self._send_message({"type": "extern_tools", "tools": extern_tools})
 
         try:
             # Main loop: wait for tasks from agent
@@ -287,11 +351,10 @@ class CapWorker:
 
             while True:
                 try:
-                    # Wait for incoming message
-                    message_data = await self.websocket.recv()
-                    message = json.loads(message_data)
-                    msg_type = message.get("type", "")
-
+                    # Get message from queue (with expected type "cap_task" or other control messages)
+                    data = await self.websocket.recv()
+                    message = json.loads(data)
+                    msg_type = message.get("type", "unknown")
                     logger.info(f"Received message type: {msg_type}")
 
                     if msg_type == "cap_task":
@@ -358,13 +421,10 @@ class CapWorker:
                         await self._send_message({"type": "pong"})
 
                     else:
+                        # Put message into queue
+                        await self.message_queue.put(message)
                         logger.warning(f"Unknown message type: {msg_type}")
 
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("WebSocket connection closed")
-                    break
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse message: {e}")
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     import traceback
