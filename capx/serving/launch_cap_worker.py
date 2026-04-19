@@ -334,7 +334,7 @@ class CapWorker:
         agent_id = self.config.args.agent_id
         extern_tools = [
             {
-                "name": "send_task_to_capworker",
+                "name": "trigger_cap_task",
                 "description": f"Send a task instruction to Robot {agent_id} for execution. This tool should ONLY be called when you need to send a task to the {agent_id} for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
                 "inputSchema": {
                     "type": "object",
