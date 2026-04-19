@@ -159,9 +159,9 @@ class CapWorker:
         try:
             # Prepare headers to identify this as a CapWorker client
             headers = {
-                "agent-id": self.config.args.agent_id,
-                "client-type": "cap-worker",
-                "cap-tag": "capx-robot-control",
+                "agent_id": self.config.args.agent_id,
+                "client_type": "cap-worker",
+                "cap_tag": "capx-robot-control",
             }
 
             # Connect to WebSocket server with headers
@@ -331,11 +331,21 @@ class CapWorker:
         # logger.info("Started background message receiver task")
 
         # Send extern tools
+        agent_id = self.config.args.agent_id
         extern_tools = [
             {
                 "name": "send_task_to_capworker",
-                "description": "Send a task instruction to CapWorker for execution. This tool should ONLY be called when you need to send a task to the CapWorker for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
-                "inputSchema": {"type": "object", "properties": {}, "required": []},
+                "description": f"Send a task instruction to Robot {agent_id} for execution. This tool should ONLY be called when you need to send a task to the {agent_id} for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "The task instruction to be executed by the robot. Describe clearly what the robot should do, including objects to manipulate, actions to perform, and any specific requirements.",
+                        }
+                    },
+                    "required": ["task"],
+                },
                 "mockResponse": {
                     "success": True,
                     "message": "Task sent to CapWorker successfully",

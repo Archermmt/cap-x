@@ -115,9 +115,9 @@ class TestAgentServer:
             headers = (
                 dict(websocket.request.headers) if hasattr(websocket, "request") else {}
             )
-            agent_id = headers.get("agent-id", "unknown-client")
-            client_type = headers.get("client-type", "unknown")
-            cap_tag = headers.get("cap-tag", "")
+            agent_id = headers.get("agent_id", "unknown-client")
+            client_type = headers.get("client_type", "unknown")
+            cap_tag = headers.get("cap_tag", "")
 
             logger.info(
                 f"✓ Client {agent_id} connected (type: {client_type}, tag: {cap_tag})"
