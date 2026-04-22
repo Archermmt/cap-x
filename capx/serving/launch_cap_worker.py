@@ -99,6 +99,7 @@ class CapWorker:
         self.worker_config = config.config
         self.websocket = None
         self.env = None
+        self._prompt, self._exec_code = None, None
         self.message_queue = asyncio.Queue()
         agent_url = f"ws://{config.args.agent_host}:{config.args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
@@ -150,7 +151,7 @@ class CapWorker:
             self.websocket = None
             logger.info("Disconnected from agent server")
 
-    async def run_trial(
+    def run_trial(
         self, task_goal: str, trial: int = 0, multi_turn_prompt: str | None = None
     ):
         """Execute a single trial by communicating with the agent.
@@ -195,17 +196,7 @@ class CapWorker:
             message = {"type": "query_model", "prompt": prompt}
             await self._send_message(message)
             logger.info(f"Sent prompt to server (length: {len(prompt)})")
-
-            # Wait for response from message queue
-            response = await self._receive_message(expected_type="query_model_response")
-            logger.info(f"Received response from server: {response.get('type')}")
-
-            if response.get("type") == "query_model_response":
-                return response.get("content", "")
-            else:
-                raise ValueError(
-                    f"Expected query_model_response, got {response.get('type')}"
-                )
+            return True
 
         # Run async function in event loop
         try:
@@ -216,44 +207,23 @@ class CapWorker:
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(lambda: asyncio.run(_async_query()))
-                    return future.result(timeout=120)
+                    future.result(timeout=120)
             else:
-                return asyncio.run(_async_query())
+                asyncio.run(_async_query())
         except Exception as e:
             logger.error(f"Error querying model via WebSocket: {e}")
             import traceback
 
             traceback.print_exc()
             raise
+        print("[TMFINO] waiting for exec code", flush=True)
+        print("[TMINFO] exec_code " + str(self._exec_code), flush=True)
+        import time
 
-    async def _receive_message(self, expected_type: str = None, timeout: float = 120.0) -> dict:
-        """Receive a message from the message queue.
-
-        Args:
-            expected_type: Expected message type. If None, returns any message.
-            timeout: Timeout in seconds to wait for message.
-
-        Returns:
-            Message dictionary
-        """
-        import asyncio
-
-        try:
-            if expected_type:
-                # Wait for specific message type
-                while True:
-                    message = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
-                    if message.get("type") == expected_type:
-                        return message
-                    else:
-                        # Put back non-matching messages (shouldn't happen in normal flow)
-                        logger.warning(f"Received unexpected message type: {message.get('type')}, expected: {expected_type}")
-            else:
-                # Wait for any message
-                message = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
-                return message
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Timeout waiting for message type: {expected_type}")
+        while not self._exec_code:
+            time.sleep(0.5)
+        print("[TMINFO] final exec_code " + str(self._exec_code), flush=True)
+        return self._exec_code
 
     async def start(self):
         """Start the CapWorker by connecting to agent and listening for tasks.
@@ -327,9 +297,10 @@ class CapWorker:
                         trial_num = message.get("trial", task_count - 1)
                         multi_turn_prompt = message.get("multi_turn_prompt")
                         logger.info(f"Starting trial {trial_num} (task #{task_count})")
+                        self._prompt, self._exec_code = None, None
 
                         try:
-                            result = await self.run_trial(
+                            result = self.run_trial(
                                 task_goal,
                                 trial_num,
                                 multi_turn_prompt=multi_turn_prompt,
@@ -384,7 +355,8 @@ class CapWorker:
 
                     elif msg_type == "query_model_response":
                         # Put query_model_response into message queue for query_model to consume
-                        await self.message_queue.put(message)
+                        # await self.message_queue.put(message)
+                        self._exec_code = message["content"]
                         logger.debug("query_model_response message queued")
 
                     else:
