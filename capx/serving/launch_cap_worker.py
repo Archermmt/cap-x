@@ -18,6 +18,8 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+
+from requests import Response
 import tyro
 from pathlib import Path
 import websockets
@@ -99,9 +101,6 @@ class CapWorker:
         self.worker_config = config.config
         self.websocket = None
         self.env = None
-        self.message_queue = asyncio.Queue()  # Queue for storing received messages
-        self._message_receiver_task = None  # Background task for receiving messages
-
         agent_url = f"ws://{config.args.agent_host}:{config.args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
 
@@ -116,35 +115,6 @@ class CapWorker:
 
         await self.websocket.send(json.dumps(message))
         logger.debug(f"Sent to agent: {message.get('type')}")
-
-    async def _receive_message(self, expected_type: str = None) -> dict[str, Any]:
-        """Receive a message from the agent via WebSocket.
-
-        Args:
-            expected_type: Expected message type. If specified, messages with different types
-                          will be put back into the queue.
-
-        Returns:
-            Received message as dictionary
-        """
-        if self.websocket is None:
-            raise RuntimeError("Not connected to agent server")
-
-        # Get message from queue
-        while True:
-            message = await self.message_queue.get()
-            msg_type = message.get("type", "")
-
-            # If no expected type or type matches, return the message
-            if expected_type is None or msg_type == expected_type:
-                logger.debug(f"Received from agent: {msg_type}")
-                return message
-            else:
-                # Put back into queue if type doesn't match
-                logger.debug(
-                    f"Message type '{msg_type}' doesn't match expected '{expected_type}', putting back"
-                )
-                await self.message_queue.put(message)
 
     async def connect(self):
         """Connect to the agent server via WebSocket.
@@ -175,52 +145,11 @@ class CapWorker:
 
     async def disconnect(self):
         """Disconnect from the agent server."""
-        # Cancel message receiver task
-        if self._message_receiver_task:
-            self._message_receiver_task.cancel()
-            try:
-                await self._message_receiver_task
-            except asyncio.CancelledError:
-                pass
-            self._message_receiver_task = None
 
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
             logger.info("Disconnected from agent server")
-
-    async def _message_receiver_loop(self):
-        """Background task to receive messages from WebSocket and put them into queue.
-
-        This loop continuously receives messages from the WebSocket connection
-        and places them into the message_queue for processing by other parts of the code.
-        """
-        try:
-            while True:
-                try:
-                    # Receive message from WebSocket
-                    data = await self.websocket.recv()
-                    message = json.loads(data)
-                    msg_type = message.get("type", "unknown")
-
-                    # Put message into queue
-                    await self.message_queue.put(message)
-                    logger.debug(f"Received message '{msg_type}' and put into queue")
-
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("WebSocket connection closed in receiver loop")
-                    break
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse message: {e}")
-                except Exception as e:
-                    logger.error(f"Error in message receiver loop: {e}")
-                    import traceback
-
-                    traceback.print_exc()
-                    break
-        except asyncio.CancelledError:
-            logger.info("Message receiver loop cancelled")
-            raise
 
     async def run_trial(
         self, task_goal: str, trial: int = 0, multi_turn_prompt: str | None = None
@@ -234,7 +163,6 @@ class CapWorker:
             trial: Trial number
             multi_turn_prompt: Optional multi-turn prompt template
         """
-        llm_client.query_model = self.query_model
         from capx.envs.runner import _run_trial_with_retries
 
         self.env.change_goal(task_goal)
@@ -270,7 +198,8 @@ class CapWorker:
             logger.info(f"Sent prompt to server (length: {len(prompt)})")
 
             # Wait for response with expected type
-            response = await self._receive_message(expected_type="query_model_response")
+            # response = await self._receive_message(expected_type="query_model_response")
+            response = await self.websocket.recv()
             logger.info(f"Received response from server: {response.get('type')}")
 
             if response.get("type") == "query_model_response":
@@ -308,6 +237,7 @@ class CapWorker:
         3. When receiving 'cap_task' message, executes run_trial
         4. Continues listening for more tasks
         """
+        llm_client.query_model = self.query_model
         agent_url = f"ws://{self.config.args.agent_host}:{self.config.args.agent_port}"
         logger.info(f"Starting CapWorker, connecting to: {agent_url}")
 
@@ -325,10 +255,6 @@ class CapWorker:
 
         # Connect to agent server
         await self.connect()
-
-        # Start background message receiver task
-        # self._message_receiver_task = asyncio.create_task(self._message_receiver_loop())
-        # logger.info("Started background message receiver task")
 
         # Send extern tools
         agent_id = self.config.args.agent_id
@@ -373,7 +299,6 @@ class CapWorker:
                         task_goal = message["content"]
                         trial_num = message.get("trial", task_count - 1)
                         multi_turn_prompt = message.get("multi_turn_prompt")
-
                         logger.info(f"Starting trial {trial_num} (task #{task_count})")
 
                         try:

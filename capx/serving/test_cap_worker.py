@@ -128,14 +128,6 @@ class TestAgentServer:
             logger.info(
                 f"Client {agent_id} registered. Total clients: {len(self.clients)}"
             )
-            await websocket.send(
-                json.dumps(
-                    {
-                        "type": "cap_task",
-                        "content": "Pick up the green cube and gently stack it on top of the red cube, then release it.",
-                    }
-                )
-            )
 
             # Main message loop
             async for message_data in websocket:
@@ -147,6 +139,15 @@ class TestAgentServer:
 
                     if msg_type == "query_model":
                         await self._handle_query_model(websocket, message["prompt"])
+                    elif msg_type == "extern_tools":
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "cap_task",
+                                    "content": "Pick up the green cube and gently stack it on top of the red cube, then release it.",
+                                }
+                            )
+                        )
                     else:
                         logger.warning(f"Unknown message type: {msg_type}")
 
