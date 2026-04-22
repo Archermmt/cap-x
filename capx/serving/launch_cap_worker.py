@@ -19,10 +19,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from requests import Response
 import tyro
 from pathlib import Path
-import websockets
 from websockets.asyncio.client import connect as ws_connect
 
 from capx.envs.launch import LaunchArgs
@@ -101,6 +99,7 @@ class CapWorker:
         self.worker_config = config.config
         self.websocket = None
         self.env = None
+        self.message_queue = asyncio.Queue()
         agent_url = f"ws://{config.args.agent_host}:{config.args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
 
@@ -197,9 +196,8 @@ class CapWorker:
             await self._send_message(message)
             logger.info(f"Sent prompt to server (length: {len(prompt)})")
 
-            # Wait for response with expected type
-            # response = await self._receive_message(expected_type="query_model_response")
-            response = await self.websocket.recv()
+            # Wait for response from message queue
+            response = await self._receive_message(expected_type="query_model_response")
             logger.info(f"Received response from server: {response.get('type')}")
 
             if response.get("type") == "query_model_response":
@@ -227,6 +225,35 @@ class CapWorker:
 
             traceback.print_exc()
             raise
+
+    async def _receive_message(self, expected_type: str = None, timeout: float = 120.0) -> dict:
+        """Receive a message from the message queue.
+
+        Args:
+            expected_type: Expected message type. If None, returns any message.
+            timeout: Timeout in seconds to wait for message.
+
+        Returns:
+            Message dictionary
+        """
+        import asyncio
+
+        try:
+            if expected_type:
+                # Wait for specific message type
+                while True:
+                    message = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
+                    if message.get("type") == expected_type:
+                        return message
+                    else:
+                        # Put back non-matching messages (shouldn't happen in normal flow)
+                        logger.warning(f"Received unexpected message type: {message.get('type')}, expected: {expected_type}")
+            else:
+                # Wait for any message
+                message = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
+                return message
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Timeout waiting for message type: {expected_type}")
 
     async def start(self):
         """Start the CapWorker by connecting to agent and listening for tasks.
@@ -355,9 +382,12 @@ class CapWorker:
                         # Respond to ping
                         await self._send_message({"type": "pong"})
 
-                    else:
-                        # Put message into queue
+                    elif msg_type == "query_model_response":
+                        # Put query_model_response into message queue for query_model to consume
                         await self.message_queue.put(message)
+                        logger.debug("query_model_response message queued")
+
+                    else:
                         logger.warning(f"Unknown message type: {msg_type}")
 
                 except Exception as e:
