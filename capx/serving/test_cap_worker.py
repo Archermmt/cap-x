@@ -15,14 +15,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from click.core import F
+import uvicorn
 from dataclasses import dataclass
 from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 import tyro
 import websockets
 from websockets.asyncio.server import serve as ws_serve
 
 from capx.envs.launch import LaunchArgs
+from capx.serving.openrouter_server import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    Message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +50,7 @@ class TestAgentArgs(LaunchArgs):
     # WebSocket server configuration
     agent_host: str = "localhost"
     agent_port: int = 8765
+    http_port: int = 8110
     agent_id: str = "test-agent-server"
 
 
@@ -85,6 +97,10 @@ class TestAgentServer:
         self.agent_config = config.config
         self.clients = {}  # Track connected clients by agent_id
         self.server = None
+
+        # Async message pipes for communication between HTTP and WebSocket
+        self.inbound_messages = asyncio.Queue()
+        self.outbound_messages = asyncio.Queue()
 
         # Initialize OpenAI client
         api_key = _load_api_keys(".openrouterkey")[0]
@@ -134,17 +150,19 @@ class TestAgentServer:
                 try:
                     message = json.loads(message_data)
                     msg_type = message.get("type", "")
-
                     logger.info(f"Received message from {agent_id}: {msg_type}")
 
-                    if msg_type == "query_model":
-                        await self._handle_query_model(websocket, message["prompt"])
-                    elif msg_type == "extern_tools":
+                    if msg_type == "extern_tools":
                         await websocket.send(
                             json.dumps(
                                 {
                                     "type": "cap_task",
                                     "content": "Pick up the green cube and gently stack it on top of the red cube, then release it.",
+                                    "args": {
+                                        "server_url": "{}:{}".format(
+                                            self.args.agent_host, self.args.http_port
+                                        )
+                                    },
                                 }
                             )
                         )
@@ -174,7 +192,7 @@ class TestAgentServer:
                     f"Client {agent_id} unregistered. Remaining clients: {len(self.clients)}"
                 )
 
-    async def _handle_query_model(self, websocket, prompt: list[dict]):
+    async def _handle_query_model(self):
         """Handle query_model request from CapWorker.
 
         Args:
@@ -182,21 +200,18 @@ class TestAgentServer:
             prompt: Prompt messages for the LLM
         """
 
-        payload = {
-            "model": self.args.model,
-            "temperature": self.args.temperature,
-            "max_tokens": self.args.max_tokens,
-            "messages": prompt,
-        }
+        data = await self.inbound_messages.get()
+        payload = data["content"]
 
         try:
             response = await self.llm_client.chat.completions.create(**payload)
-            results = {"type": "query_model_response"}
+            results = {"type": "chat_response"}
             try:
                 results["content"] = response.choices[0].message.content
             except (KeyError, IndexError) as exc:
                 raise RuntimeError(f"Unexpected response format: {response}") from exc
-            await websocket.send(json.dumps(results))
+            # await websocket.send(json.dumps(results))
+            await self.outbound_messages.put(results)
             logger.info("Query model response sent to client")
         except Exception as e:
             logger.error(f"Error handling query_model: {e}")
@@ -205,11 +220,68 @@ class TestAgentServer:
             traceback.print_exc()
 
             # Send error response
-            await websocket.send(
-                json.dumps(
-                    {"type": "query_model_response", "content": "", "error": str(e)}
-                )
+            await self.outbound_messages.put(
+                {"type": "chat_response", "content": "", "error": str(e)}
             )
+
+    def create_app(self) -> FastAPI:
+        app = FastAPI(title="TestCap Proxy", version="1.0.0")
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        @app.post("/chat/completions")
+        async def chat_completions(request: ChatCompletionRequest):
+            try:
+                client_kwargs = request.model_dump(exclude_none=True)
+                model = client_kwargs.get("model", "")
+                if model.startswith("openrouter/"):
+                    client_kwargs["model"] = model[len("openrouter/") :]
+                # Put request into inbound queue
+                await self.inbound_messages.put(
+                    {"type": "chat_completion", "content": client_kwargs}
+                )
+                logger.info("Chat completion request put into inbound queue")
+                await self._handle_query_model()
+                # Wait for response from outbound queue
+                response_data = await self.outbound_messages.get()
+                logger.info("Received response from outbound queue")
+                if response_data.get("error"):
+                    raise HTTPException(status_code=500, detail=response_data["error"])
+
+                # Build response
+                choice = ChatCompletionResponseChoice(
+                    index=0,
+                    message=Message(role="assistant", content=response_data["content"]),
+                    finish_reason=response_data.get("finish_reason", "stop"),
+                )
+
+                return ChatCompletionResponse(
+                    id=response_data.get("id", ""),
+                    created=response_data.get("created", 0),
+                    model=response_data.get("model", ""),
+                    choices=[choice],
+                )
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error in chat_completions: {e}")
+                import traceback
+
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/health")
+        async def health():
+            return {"status": "ok"}
+
+        return app
 
     async def start(self):
         """Start WebSocket server."""
@@ -219,7 +291,21 @@ class TestAgentServer:
         port = self.args.agent_port
         self.server = await ws_serve(self.handle_client, host, port)
 
+        # Create and start HTTP server asynchronously (non-blocking)
+        self.llm_app = self.create_app()
+        config = uvicorn.Config(
+            self.llm_app, host=host, port=self.args.http_port, log_level="info"
+        )
+        self.llm_server = uvicorn.Server(config)
+
+        # Start HTTP server in background task
+        asyncio.create_task(self.llm_server.serve())
+
+        # Start message processor task
+        asyncio.create_task(self._process_messages())
+
         logger.info(f"✓ WebSocket server started on ws://{host}:{port}")
+        logger.info(f"✓ HTTP server started on http://{host}:8110")
         logger.info("✓ TestAgentServer is ready!")
 
         # Keep server running
@@ -237,6 +323,70 @@ class TestAgentServer:
             self.server.close()
             await self.server.wait_closed()
             logger.info("TestAgentServer stopped")
+
+        # Stop HTTP server
+        if hasattr(self, "llm_server") and self.llm_server:
+            self.llm_server.should_exit = True
+            logger.info("HTTP server stopped")
+
+    async def _process_messages(self):
+        """Process messages from inbound queue and put results to outbound queue."""
+        logger.info("Message processor started")
+
+        while True:
+            try:
+                # Get message from inbound queue
+                message = await self.inbound_messages.get()
+                msg_type = message.get("type", "chat_completion")
+
+                if msg_type == "chat_completion":
+                    # Handle chat_completion request
+                    client_kwargs = message["client_kwargs"]
+
+                    # Strip the "openrouter/" prefix if present
+                    model = client_kwargs.get("model", "")
+                    if model.startswith("openrouter/"):
+                        client_kwargs["model"] = model[len("openrouter/") :]
+
+                    client_kwargs["stream"] = False
+                    response = await self.llm_client.chat.completions.create(
+                        **client_kwargs
+                    )
+
+                    # Build response data
+                    choices_data = []
+                    for c in response.choices:
+                        choices_data.append(
+                            {
+                                "index": c.index,
+                                "message": {
+                                    "role": c.message.role,
+                                    "content": c.message.content,
+                                },
+                                "finish_reason": c.finish_reason,
+                            }
+                        )
+
+                    response_data = {
+                        "id": response.id,
+                        "created": response.created,
+                        "model": response.model,
+                        "choices": choices_data,
+                    }
+
+                    # Put response into outbound queue
+                    await self.outbound_messages.put(response_data)
+                    logger.info("Chat completion response put into outbound queue")
+
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+                # Put error into outbound queue if it's a chat_completion request
+                if msg_type == "chat_completion":
+                    await self.outbound_messages.put({"error": str(e)})
 
 
 # ---------------------------------------------------------------------------

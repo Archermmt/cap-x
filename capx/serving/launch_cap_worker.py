@@ -25,8 +25,6 @@ from websockets.asyncio.client import connect as ws_connect
 
 from capx.envs.launch import LaunchArgs
 from capx.envs.configs.instantiate import instantiate
-from capx.llm import client as llm_client
-from capx.llm.client import ModelQueryArgs
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +97,6 @@ class CapWorker:
         self.worker_config = config.config
         self.websocket = None
         self.env = None
-        self._prompt, self._exec_code = None, None
-        self._exec_code_event = asyncio.Event()
-        self.message_queue = asyncio.Queue()
         agent_url = f"ws://{config.args.agent_host}:{config.args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
 
@@ -152,7 +147,7 @@ class CapWorker:
             self.websocket = None
             logger.info("Disconnected from agent server")
 
-    async def run_trial(
+    def run_trial(
         self, task_goal: str, trial: int = 0, multi_turn_prompt: str | None = None
     ):
         """Execute a single trial by communicating with the agent.
@@ -167,87 +162,9 @@ class CapWorker:
         from capx.envs.runner import _run_trial_with_retries
 
         self.env.change_goal(task_goal)
-
-        # Create a task to run the trial in a thread pool (since it's synchronous)
-        import concurrent.futures
-
-        loop = asyncio.get_event_loop()
-
-        def _run_trial_sync():
-            return _run_trial_with_retries(
-                self.env, trial, self.args, self.worker_config, multi_turn_prompt
-            )
-
-        # Run in thread pool to avoid blocking the event loop
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = loop.run_in_executor(executor, _run_trial_sync)
-            results = await future
-
-        print(f"[TMINFO] get results {results}")
-        return results
-
-    def query_model(
-        self, args: "LaunchArgs | ModelQueryArgs", prompt: list[dict]
-    ) -> str:
-        """Query model via WebSocket by sending prompt to server.
-
-        This method sends the prompt to the test server via WebSocket
-        and waits for the response. Can be called from both sync and async contexts.
-
-        Args:
-            args: Model query arguments (not used in WebSocket mode)
-            prompt: Prompt messages to send to the server
-
-        Returns:
-            Model response content
-        """
-        if self.websocket is None:
-            raise RuntimeError("WebSocket not connected. Call start() first.")
-
-        # Send prompt message (need to run in event loop)
-        import concurrent.futures
-
-        async def _send_and_wait():
-            message = {"type": "query_model", "prompt": prompt}
-            await self._send_message(message)
-            logger.info(f"Sent prompt to server (length: {len(prompt)})")
-
-            # Wait for exec_code from server
-            exec_code = await self.wait_for_exec_code(timeout=120.0)
-            return exec_code
-
-        # Check if we're already in an event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're in an async context but this is called from sync code
-                # Run in a separate thread to avoid blocking
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(lambda: asyncio.run(_send_and_wait()))
-                    return future.result(timeout=120)
-            else:
-                # No running loop, safe to use asyncio.run
-                return asyncio.run(_send_and_wait())
-        except RuntimeError:
-            # No event loop exists, create one
-            return asyncio.run(_send_and_wait())
-
-    async def wait_for_exec_code(self, timeout: float = 120.0) -> str:
-        """Wait for exec_code to be received from server.
-
-        Args:
-            timeout: Timeout in seconds to wait for exec_code.
-
-        Returns:
-            The exec_code content received from server.
-        """
-        try:
-            logger.info("Waiting for exec_code from server...")
-            await asyncio.wait_for(self._exec_code_event.wait(), timeout=timeout)
-            logger.info(f"Received exec_code (length: {len(self._exec_code)})")
-            return self._exec_code
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Timeout waiting for exec_code after {timeout} seconds")
+        return _run_trial_with_retries(
+            self.env, trial, self.args, self.worker_config, multi_turn_prompt
+        )
 
     async def start(self):
         """Start the CapWorker by connecting to agent and listening for tasks.
@@ -258,7 +175,6 @@ class CapWorker:
         3. When receiving 'cap_task' message, executes run_trial
         4. Continues listening for more tasks
         """
-        llm_client.query_model = self.query_model
         agent_url = f"ws://{self.config.args.agent_host}:{self.config.args.agent_port}"
         logger.info(f"Starting CapWorker, connecting to: {agent_url}")
 
@@ -304,7 +220,6 @@ class CapWorker:
         try:
             # Main loop: wait for tasks from agent
             logger.info("CapWorker ready, waiting for tasks...")
-            task_count = 0
 
             while True:
                 try:
@@ -315,57 +230,46 @@ class CapWorker:
                     logger.info(f"Received message type: {msg_type}")
 
                     if msg_type == "cap_task":
-                        # Execute trial when receiving cap_task message
-                        task_count += 1
-                        task_goal = message["content"]
-                        trial_num = message.get("trial", task_count - 1)
-                        multi_turn_prompt = message.get("multi_turn_prompt")
-                        logger.info(f"Starting trial {trial_num} (task #{task_count})")
-                        self._prompt, self._exec_code = None, None
-                        self._exec_code_event.clear()
-
                         try:
-                            result = await self.run_trial(
-                                task_goal,
-                                trial_num,
-                                multi_turn_prompt=multi_turn_prompt,
+                            args = message.get("args", {})
+                            for k, v in args.items():
+                                setattr(self.args, k, v)
+                            result = self.run_trial(
+                                message["content"],
+                                multi_turn_prompt=message.get("multi_turn_prompt"),
                             )
-
-                            logger.info(f"Trial {trial_num} completed: {result}")
 
                             # Send result back to agent
                             await self._send_message(
                                 {
                                     "type": "task_result",
-                                    "trial": trial_num,
-                                    "success": result.get("success", False),
-                                    "reward": result.get("reward", 0.0),
-                                    "sandbox_rc": result.get("sandbox_rc", -1),
-                                    "task_completed": result.get(
-                                        "task_completed", False
-                                    ),
-                                    "code_path": result.get("code_path", ""),
-                                    "num_regenerations": result.get(
-                                        "num_regenerations", 0
-                                    ),
-                                    "num_finishes": result.get("num_finishes", 0),
-                                    "num_code_blocks": result.get("num_code_blocks", 0),
+                                    "result": {
+                                        "success": result.get("success", False),
+                                        "reward": result.get("reward", 0.0),
+                                        "sandbox_rc": result.get("sandbox_rc", -1),
+                                        "task_completed": result.get(
+                                            "task_completed", False
+                                        ),
+                                        "code_path": result.get("code_path", ""),
+                                        "num_regenerations": result.get(
+                                            "num_regenerations", 0
+                                        ),
+                                        "num_finishes": result.get("num_finishes", 0),
+                                        "num_code_blocks": result.get(
+                                            "num_code_blocks", 0
+                                        ),
+                                    },
                                 }
                             )
 
                         except Exception as e:
-                            logger.error(f"Trial {trial_num} failed: {e}")
                             import traceback
 
                             traceback.print_exc()
-
-                            # Send error result to agent
                             await self._send_message(
                                 {
                                     "type": "task_result",
-                                    "trial": trial_num,
-                                    "success": False,
-                                    "error": str(e),
+                                    "result": {"success": False, "error": str(e)},
                                 }
                             )
 
@@ -373,17 +277,9 @@ class CapWorker:
                         # Graceful shutdown request
                         logger.info("Received shutdown signal")
                         break
-
                     elif msg_type == "ping":
                         # Respond to ping
                         await self._send_message({"type": "pong"})
-
-                    elif msg_type == "query_model_response":
-                        # Set exec_code and signal the waiting coroutine
-                        self._exec_code = message.get("content", "")
-                        self._exec_code_event.set()
-                        logger.debug("query_model_response received and event signaled")
-
                     else:
                         logger.warning(f"Unknown message type: {msg_type}")
 
