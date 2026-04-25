@@ -14,6 +14,7 @@ Usage::
 from __future__ import annotations
 
 import os
+import shutil
 import asyncio
 import json
 import logging
@@ -143,6 +144,54 @@ class CapWorker:
             self.websocket = None
             logger.info("Disconnected from agent server")
 
+    def _encode_video_to_base64(self, video_path: str) -> str | None:
+        """Encode a video file to base64 string.
+
+        Args:
+            video_path: Path to the video file
+
+        Returns:
+            Base64 encoded string or None if encoding fails
+        """
+        import base64
+
+        try:
+            with open(video_path, "rb") as f:
+                video_data = f.read()
+                base64_video = base64.b64encode(video_data).decode("utf-8")
+                return f"data:video/mp4;base64,{base64_video}"
+        except Exception as e:
+            logger.error(f"Failed to encode video {video_path}: {e}")
+            return None
+
+    def _get_task_records(self, result, send_all=False):
+        """Send task record message with encoded video if available.
+
+        Args:
+            result: TrialSummary object containing code_path and other info
+        """
+        if not result.code_path:
+            logger.warning("No code_path in result, skipping task_record")
+            return
+
+        trial_dir = Path(result.code_path).parent
+        video_files = list(trial_dir.glob("*.mp4"))
+
+        if not video_files:
+            logger.info("No video files found in trial directory")
+            return
+
+        # Encode all video files
+        records = []
+        for video_file in video_files:
+            logger.info(f"Encoding video: {video_file.name}")
+            base64_video = self._encode_video_to_base64(str(video_file))
+            if base64_video:
+                records.append(base64_video)
+        if not send_all:
+            records = records[:1]
+        return records
+
     def run_trial(
         self, task_goal: str, trial: int = 0, multi_turn_prompt: str | None = None
     ):
@@ -230,10 +279,32 @@ class CapWorker:
                             args = message.get("args", {})
                             for k, v in args.items():
                                 setattr(self.args, k, v)
+
+                            # Clear output directory before running trial
+                            if self.config.get("output_dir"):
+                                output_path = Path(self.config["output_dir"])
+                                if output_path.exists():
+                                    logger.info(
+                                        f"Clearing output directory: {output_path}"
+                                    )
+                                    shutil.rmtree(output_path)
+                                output_path.mkdir(parents=True, exist_ok=True)
+
                             result = self.run_trial(
                                 message["content"],
                                 multi_turn_prompt=message.get("multi_turn_prompt"),
                             )
+
+                            # Send task record with video before sending result
+                            records = self._get_task_records(result)
+                            if records:
+                                logger.info(
+                                    f"Sending task_record with {len(records)} video(s)"
+                                )
+                                await self._send_message(
+                                    {"type": "task_record", "records": records}
+                                )
+
                             # Send result back to agent
                             await self._send_message(
                                 {"type": "task_result", "result": asdict(result)}
