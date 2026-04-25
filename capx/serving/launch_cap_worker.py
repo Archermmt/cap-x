@@ -13,10 +13,11 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Any
 
 import tyro
@@ -25,6 +26,7 @@ from websockets.asyncio.client import connect as ws_connect
 
 from capx.envs.launch import LaunchArgs
 from capx.envs.configs.instantiate import instantiate
+from capx.envs.configs.loader import DictLoader
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +52,11 @@ class CapWorkerArgs(LaunchArgs):
     http_port: int = 8112
     """http port to listen on."""
 
-    agent_id: str = "cap-worker"
+    agent_id: str = "cap"
     """Agent ID to identify this worker to the server."""
+
+    robot_name: str = "jarvis"
+    """Name of the robot being controlled."""
 
 
 # ---------------------------------------------------------------------------
@@ -59,22 +64,7 @@ class CapWorkerArgs(LaunchArgs):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class CapWorkerConfig:
-    """Configuration for CapWorker."""
 
-    args: CapWorkerArgs
-    """Command-line arguments."""
-
-    env_factory: Any = None
-    """Environment factory function."""
-
-    config: dict[str, Any] = None
-    """Configuration dictionary loaded from YAML."""
-
-    def __post_init__(self):
-        if self.config is None:
-            self.config = {}
 
 
 class CapWorker:
@@ -85,19 +75,36 @@ class CapWorker:
     receiving responses for code generation and decision making.
     """
 
-    def __init__(self, config: CapWorkerConfig):
-        """Initialize CapWorker with configuration.
+    def __init__(self, args: CapWorkerArgs):
+        """Initialize CapWorker with command-line arguments.
+
+        This method loads environment configuration and initializes all components.
 
         Args:
-            config: Worker configuration including args, env_factory, and config_dict
+            args: Command-line arguments containing configuration path and other settings
         """
-        self.config = config
-        self.args = config.args
-        self.env_factory = config.env_factory
-        self.worker_config = config.config
+        from capx.utils.launch_utils import _load_config
+
+        # Load environment configuration
+        env_factory, config, _ = _load_config(args)
+        if config.get("model"):
+            args.model = config["model"]
+        if config.get("visual_differencing_model"):
+            args.visual_differencing_model = config["visual_differencing_model"]
+        
+        # Load additional args from config file
+        config_path = os.path.expanduser(args.config_path)
+        configs_dict = DictLoader.load([config_path])
+        for key in ["agent_host", "agent_port", "http_port", "agent_id", "robot_name"]:
+            if key in configs_dict:
+                setattr(args, key, configs_dict[key])
+
+        self.args = args
+        self.env_factory = env_factory
+        self.worker_config = config
         self.websocket = None
         self.env = None
-        agent_url = f"ws://{config.args.agent_host}:{config.args.agent_port}"
+        agent_url = f"ws://{args.agent_host}:{args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
 
     async def _send_message(self, message: dict[str, Any]):
@@ -119,13 +126,13 @@ class CapWorker:
         1. Establishes WebSocket connection with custom headers
         2. Adds agent_id and cap-related tags to identify this as a CapWorker client
         """
-        agent_url = f"ws://{self.config.args.agent_host}:{self.config.args.agent_port}"
+        agent_url = f"ws://{self.args.agent_host}:{self.args.agent_port}"
         logger.info(f"Connecting to agent server at {agent_url}")
 
         try:
             # Prepare headers to identify this as a CapWorker client
             headers = {
-                "agent_id": self.config.args.agent_id,
+                "agent_id": self.args.agent_id,
                 "client_type": "cap-worker",
                 "cap_tag": "capx-robot-control",
             }
@@ -133,7 +140,7 @@ class CapWorker:
             # Connect to WebSocket server with headers
             self.websocket = await ws_connect(agent_url, additional_headers=headers)
             logger.info("✓ WebSocket connection established")
-            logger.info(f"✓ Connected to agent server as {self.config.args.agent_id}")
+            logger.info(f"✓ Connected to agent server as {self.args.agent_id}")
 
         except Exception as e:
             logger.error(f"Failed to connect to agent server: {e}")
@@ -185,7 +192,7 @@ class CapWorker:
         # parse output dir
         if self.worker_config["output_dir"]:
             parts = self.worker_config["output_dir"].split("/")
-            parts.insert(-1, str(self.args.model).replace("/", "_"))
+            parts.insert(-1, "cap_worker")
             new_out_dir = "/".join(parts)
             Path(new_out_dir).mkdir(parents=True, exist_ok=True)
             self.worker_config["output_dir"] = new_out_dir
@@ -194,17 +201,17 @@ class CapWorker:
         await self.connect()
 
         # Send extern tools
-        agent_id = self.config.args.agent_id
+        robot_name = self.args.robot_name
         extern_tools = [
             {
                 "name": "trigger_cap_task",
-                "description": f"Send a task instruction to Robot {agent_id} for execution. This tool should ONLY be called when you need to send a task to the {agent_id} for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
+                "description": f"Send a task instruction to Robot '{robot_name}' for execution. This tool should ONLY be called when you need to send a task to the '{robot_name}' for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "task": {
                             "type": "string",
-                            "description": "The task instruction to be executed by the robot. Describe clearly what the robot should do, including objects to manipulate, actions to perform, and any specific requirements.",
+                            "description": "The task instruction to be executed by the robot. Describe clearly what the robot should do, including objects to manipulate, actions to perform, and any specific requirements. IMPORTANT: This field value must be entirely in English.",
                         }
                     },
                     "required": ["task"],
@@ -238,28 +245,9 @@ class CapWorker:
                                 message["content"],
                                 multi_turn_prompt=message.get("multi_turn_prompt"),
                             )
-
                             # Send result back to agent
                             await self._send_message(
-                                {
-                                    "type": "task_result",
-                                    "result": {
-                                        "success": result.get("success", False),
-                                        "reward": result.get("reward", 0.0),
-                                        "sandbox_rc": result.get("sandbox_rc", -1),
-                                        "task_completed": result.get(
-                                            "task_completed", False
-                                        ),
-                                        "code_path": result.get("code_path", ""),
-                                        "num_regenerations": result.get(
-                                            "num_regenerations", 0
-                                        ),
-                                        "num_finishes": result.get("num_finishes", 0),
-                                        "num_code_blocks": result.get(
-                                            "num_code_blocks", 0
-                                        ),
-                                    },
-                                }
+                                {"type": "task_result", "result": asdict(result)}
                             )
 
                         except Exception as e:
@@ -301,21 +289,9 @@ class CapWorker:
 
 
 def main(args: CapWorkerArgs) -> None:
-    """Load config and start CapWorker."""
-    from capx.utils.launch_utils import _load_config
-
-    # Load environment configuration
-    env_factory, config, _ = _load_config(args)
-    if config.get("model"):
-        args.model = config["model"]
-    if config.get("visual_differencing_model"):
-        args.visual_differencing_model = config["visual_differencing_model"]
-
-    # Create CapWorkerConfig
-    worker_config = CapWorkerConfig(args=args, env_factory=env_factory, config=config)
-
+    """Start CapWorker."""
     # Create and start CapWorker
-    worker = CapWorker(worker_config)
+    worker = CapWorker(args)
 
     try:
         asyncio.run(worker.start())
