@@ -84,15 +84,7 @@ class CapWorker:
 
         # Load environment configuration
         self.args = args
-        self.env_factory, self.worker_config, _ = _load_config(self.args)
-        if self.worker_config.get("model"):
-            self.args.model = self.worker_config["model"]
-        if self.worker_config.get("visual_differencing_model"):
-            self.args.visual_differencing_model = self.worker_config[
-                "visual_differencing_model"
-            ]
-
-        # Load additional args from config file
+        self.env_factory, self.config, _ = _load_config(self.args)
         config_path = os.path.expanduser(args.config_path)
         configs_dict = DictLoader.load([config_path])
         for key in ["agent_host", "agent_port", "http_port", "agent_id", "robot_name"]:
@@ -101,7 +93,7 @@ class CapWorker:
 
         self.websocket = None
         self.env = None
-        agent_url = f"ws://{args.agent_host}:{args.agent_port}"
+        agent_url = f"ws://{self.args.agent_host}:{self.args.agent_port}"
         logger.info(f"CapWorker initialized, will connect to: {agent_url}")
 
     async def _send_message(self, message: dict[str, Any]):
@@ -167,7 +159,7 @@ class CapWorker:
 
         self.env.change_goal(task_goal)
         return _run_trial_with_retries(
-            self.env, trial, self.args, self.worker_config, multi_turn_prompt
+            self.env, trial, self.args, self.config, multi_turn_prompt
         )
 
     async def start(self):
@@ -179,7 +171,7 @@ class CapWorker:
         3. When receiving 'cap_task' message, executes run_trial
         4. Continues listening for more tasks
         """
-        agent_url = f"ws://{self.config.args.agent_host}:{self.config.args.agent_port}"
+        agent_url = f"ws://{self.args.agent_host}:{self.args.agent_port}"
         logger.info(f"Starting CapWorker, connecting to: {agent_url}")
 
         # Create environment instance
@@ -187,12 +179,12 @@ class CapWorker:
             raise RuntimeError("Environment not initialized. Provide config_path.")
         self.env = instantiate(self.env_factory)
         # parse output dir
-        if self.worker_config["output_dir"]:
-            parts = self.worker_config["output_dir"].split("/")
+        if self.config["output_dir"]:
+            parts = self.config["output_dir"].split("/")
             parts.insert(-1, "cap_worker")
             new_out_dir = "/".join(parts)
             Path(new_out_dir).mkdir(parents=True, exist_ok=True)
-            self.worker_config["output_dir"] = new_out_dir
+            self.config["output_dir"] = new_out_dir
 
         # Connect to agent server
         await self.connect()
