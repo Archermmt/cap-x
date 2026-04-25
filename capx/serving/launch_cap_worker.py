@@ -64,9 +64,6 @@ class CapWorkerArgs(LaunchArgs):
 # ---------------------------------------------------------------------------
 
 
-
-
-
 class CapWorker:
     """WebSocket client for agent interaction with CaP-X environment.
 
@@ -86,22 +83,22 @@ class CapWorker:
         from capx.utils.launch_utils import _load_config
 
         # Load environment configuration
-        env_factory, config, _ = _load_config(args)
-        if config.get("model"):
-            args.model = config["model"]
-        if config.get("visual_differencing_model"):
-            args.visual_differencing_model = config["visual_differencing_model"]
-        
+        self.args = args
+        self.env_factory, self.worker_config, _ = _load_config(self.args)
+        if self.worker_config.get("model"):
+            self.args.model = self.worker_config["model"]
+        if self.worker_config.get("visual_differencing_model"):
+            self.args.visual_differencing_model = self.worker_config[
+                "visual_differencing_model"
+            ]
+
         # Load additional args from config file
         config_path = os.path.expanduser(args.config_path)
         configs_dict = DictLoader.load([config_path])
         for key in ["agent_host", "agent_port", "http_port", "agent_id", "robot_name"]:
             if key in configs_dict:
-                setattr(args, key, configs_dict[key])
+                setattr(self.args, key, configs_dict[key])
 
-        self.args = args
-        self.env_factory = env_factory
-        self.worker_config = config
         self.websocket = None
         self.env = None
         agent_url = f"ws://{args.agent_host}:{args.agent_port}"
