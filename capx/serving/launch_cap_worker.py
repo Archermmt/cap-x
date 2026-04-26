@@ -223,19 +223,10 @@ class CapWorker:
         agent_url = f"ws://{self.args.agent_host}:{self.args.agent_port}"
         logger.info(f"Starting CapWorker, connecting to: {agent_url}")
 
-        # Create environment instance
+        # Create environment instance and connect
         if self.env_factory is None:
             raise RuntimeError("Environment not initialized. Provide config_path.")
         self.env = instantiate(self.env_factory)
-        # parse output dir
-        if self.config["output_dir"]:
-            parts = self.config["output_dir"].split("/")
-            parts.insert(-1, "cap_worker")
-            new_out_dir = "/".join(parts)
-            Path(new_out_dir).mkdir(parents=True, exist_ok=True)
-            self.config["output_dir"] = new_out_dir
-
-        # Connect to agent server
         await self.connect()
 
         # Send extern tools
@@ -262,85 +253,60 @@ class CapWorker:
         ]
         await self._send_message({"type": "extern_tools", "tools": extern_tools})
 
-        try:
-            # Main loop: wait for tasks from agent
-            logger.info("CapWorker ready, waiting for tasks...")
+        # Main loop: wait for tasks from agent
+        logger.info("CapWorker ready, waiting for tasks...")
+        while True:
+            # Get message from queue (with expected type "cap_task" or other control messages)
+            data = await self.websocket.recv()
+            message = json.loads(data)
+            msg_type = message.get("type", "unknown")
+            logger.info(f"Received message type: {msg_type}")
 
-            while True:
+            if msg_type == "cap_task":
                 try:
-                    # Get message from queue (with expected type "cap_task" or other control messages)
-                    data = await self.websocket.recv()
-                    message = json.loads(data)
-                    msg_type = message.get("type", "unknown")
-                    logger.info(f"Received message type: {msg_type}")
+                    # Clear output directory before running trial
+                    if self.config.get("output_dir"):
+                        output_path = Path(self.config["output_dir"])
+                        if output_path.exists():
+                            shutil.rmtree(output_path)
+                        output_path.mkdir(parents=True, exist_ok=True)
 
-                    if msg_type == "cap_task":
-                        try:
-                            args = message.get("args", {})
-                            for k, v in args.items():
-                                setattr(self.args, k, v)
+                    args = message.get("args", {})
+                    for k, v in args.items():
+                        setattr(self.args, k, v)
+                    result = self.run_trial(
+                        message["content"],
+                        multi_turn_prompt=message.get("multi_turn_prompt"),
+                    )
 
-                            # Clear output directory before running trial
-                            if self.config.get("output_dir"):
-                                output_path = Path(self.config["output_dir"])
-                                if output_path.exists():
-                                    logger.info(
-                                        f"Clearing output directory: {output_path}"
-                                    )
-                                    shutil.rmtree(output_path)
-                                output_path.mkdir(parents=True, exist_ok=True)
-
-                            result = self.run_trial(
-                                message["content"],
-                                multi_turn_prompt=message.get("multi_turn_prompt"),
-                            )
-
-                            # Send task record with video before sending result
-                            records = self._get_task_records(result)
-                            if records:
-                                logger.info(
-                                    f"Sending task_record with {len(records)} video(s)"
-                                )
-                                await self._send_message(
-                                    {"type": "task_record", "records": records}
-                                )
-
-                            # Send result back to agent
-                            await self._send_message(
-                                {"type": "task_result", "result": asdict(result)}
-                            )
-
-                        except Exception as e:
-                            import traceback
-
-                            traceback.print_exc()
-                            await self._send_message(
-                                {
-                                    "type": "task_result",
-                                    "result": {"success": False, "error": str(e)},
-                                }
-                            )
-
-                    elif msg_type == "shutdown":
-                        # Graceful shutdown request
-                        logger.info("Received shutdown signal")
-                        break
-                    elif msg_type == "ping":
-                        # Respond to ping
-                        await self._send_message({"type": "pong"})
-                    else:
-                        logger.warning(f"Unknown message type: {msg_type}")
+                    # Send task record with video before sending result
+                    records = self._get_task_records(result)
+                    if records:
+                        logger.info(f"Sending task_record with {len(records)} video(s)")
+                        await self._send_message(
+                            {"type": "task_record", "records": records}
+                        )
+                    # Send result back to agent
+                    await self._send_message(
+                        {"type": "task_result", "result": asdict(result)}
+                    )
 
                 except Exception as e:
-                    logger.error(f"Error processing message: {e}")
                     import traceback
 
                     traceback.print_exc()
-
-        finally:
-            # Disconnect from agent server
-            await self.disconnect()
-            logger.info("CapWorker stopped")
+                    await self._send_message(
+                        {
+                            "type": "task_result",
+                            "result": {"success": False, "error": str(e)},
+                        }
+                    )
+            elif msg_type == "shutdown":
+                # Graceful shutdown request
+                logger.info("Received shutdown signal")
+                break
+            else:
+                logger.warning(f"Unknown message type: {msg_type}")
 
 
 # ---------------------------------------------------------------------------
