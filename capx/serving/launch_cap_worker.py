@@ -43,21 +43,13 @@ class CapWorkerArgs(LaunchArgs):
     Extends LaunchArgs with WebSocket connection configuration for agent interaction.
     """
 
-    # WebSocket connection configuration (CapWorker specific)
     agent_host: str = "localhost"
-    """Host of the agent server to connect to."""
-
     agent_port: int = 8765
-    """Port of the agent server to connect to."""
-
     http_port: int = 8112
-    """http port to listen on."""
-
     agent_id: str = "cap"
-    """Agent ID to identify this worker to the server."""
-
     robot_name: str = "jarvis"
-    """Name of the robot being controlled."""
+    max_retry: int = 5
+    threshold: float = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +80,15 @@ class CapWorker:
         self.env_factory, self.config, _ = _load_config(self.args)
         config_path = os.path.expanduser(args.config_path)
         configs_dict = DictLoader.load([config_path])
-        for key in ["agent_host", "agent_port", "http_port", "agent_id", "robot_name"]:
+        for key in [
+            "agent_host",
+            "agent_port",
+            "http_port",
+            "agent_id",
+            "robot_name",
+            "max_retry",
+            "threshold",
+        ]:
             if key in configs_dict:
                 setattr(self.args, key, configs_dict[key])
 
@@ -269,6 +269,8 @@ class CapWorker:
             logger.info(f"Received message type: {msg_type}")
 
             if msg_type == "cap_task":
+                from capx.envs.runner import _run_single_trial
+
                 try:
                     # Clear output directory before running trial
                     if self.config.get("output_dir"):
@@ -280,14 +282,24 @@ class CapWorker:
                     args = message.get("args", {})
                     for k, v in args.items():
                         setattr(self.args, k, v)
-                    result = await asyncio.to_thread(
-                        self.run_trial,
-                        message["content"],
-                        multi_turn_prompt=message.get("multi_turn_prompt"),
-                    )
+                    self.env.change_goal(message["content"])
+                    best_result = None
+                    for trial in range(self.args.max_retry):
+                        result = await asyncio.to_thread(
+                            _run_single_trial,
+                            self.env,
+                            trial,
+                            self.args,
+                            self.config,
+                            message.get("multi_turn_prompt"),
+                        )
+                        if not best_result or result.reward > best_result.reward:
+                            best_result = result
+                        if best_result.reward > self.args.threshold:
+                            break
 
                     # Send task record with video before sending result
-                    records = self._get_task_records(result)
+                    records = self._get_task_records(best_result)
                     if records:
                         logger.info(f"Sending task_record with {len(records)} video(s)")
                         await self._send_message(
@@ -295,7 +307,7 @@ class CapWorker:
                         )
                     # Send result back to agent
                     await self._send_message(
-                        {"type": "task_result", "result": asdict(result)}
+                        {"type": "task_result", "result": asdict(best_result)}
                     )
 
                 except Exception as e:
