@@ -128,7 +128,12 @@ class CapWorker:
             }
 
             # Connect to WebSocket server with headers
-            self.websocket = await ws_connect(agent_url, additional_headers=headers)
+            self.websocket = await ws_connect(
+                agent_url,
+                additional_headers=headers,
+                ping_interval=120,
+                ping_timeout=300,
+            )
             logger.info("✓ WebSocket connection established")
             logger.info(f"✓ Connected to agent server as {self.args.agent_id}")
 
@@ -176,6 +181,7 @@ class CapWorker:
 
         trial_dir = Path(result.code_path).parent
         video_files = list(trial_dir.glob("*.mp4"))
+        video_files.sort(key=lambda f: f.stat().st_size, reverse=True)
 
         if not video_files:
             logger.info("No video files found in trial directory")
