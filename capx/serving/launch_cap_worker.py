@@ -210,10 +210,10 @@ class CapWorker:
             trial: Trial number
             multi_turn_prompt: Optional multi-turn prompt template
         """
-        from capx.envs.runner import _run_trial_with_retries
+        from capx.envs.runner import _run_single_trial
 
         self.env.change_goal(task_goal)
-        return _run_trial_with_retries(
+        return _run_single_trial(
             self.env, trial, self.args, self.config, multi_turn_prompt
         )
 
@@ -280,7 +280,8 @@ class CapWorker:
                     args = message.get("args", {})
                     for k, v in args.items():
                         setattr(self.args, k, v)
-                    result = self.run_trial(
+                    result = await asyncio.to_thread(
+                        self.run_trial,
                         message["content"],
                         multi_turn_prompt=message.get("multi_turn_prompt"),
                     )
