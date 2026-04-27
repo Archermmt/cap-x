@@ -271,6 +271,8 @@ class CapWorker:
             if msg_type == "cap_task":
                 from capx.envs.runner import _run_single_trial
 
+                print(f"Get task {message['content']}", flush=True)
+
                 try:
                     # Clear output directory before running trial
                     if self.config.get("output_dir"):
@@ -297,13 +299,17 @@ class CapWorker:
                             best_result = result
                         if best_result.reward > self.args.threshold:
                             break
+                        print(
+                            f"Trial[{trial+1}/{self.args.max_retry}] reward {result.reward} < {self.args.threshold}, retry...",
+                            flush=True,
+                        )
 
                     # Send task record with video before sending result
                     records = self._get_task_records(best_result)
                     if records:
                         logger.info(f"Sending task_record with {len(records)} video(s)")
                         await self._send_message(
-                            {"type": "task_record", "records": records}
+                            {"type": "task_record", "records": records, "trail": trial}
                         )
                     # Send result back to agent
                     await self._send_message(
