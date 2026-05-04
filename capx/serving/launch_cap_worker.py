@@ -22,6 +22,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 import tyro
+import numpy as np
 from pathlib import Path
 from websockets.asyncio.client import connect as ws_connect
 
@@ -240,7 +241,7 @@ class CapWorker:
         extern_tools = [
             {
                 "name": "trigger_cap_task",
-                "description": f"Send a task instruction to Robot '{robot_name}' for execution. This tool should ONLY be called when you need to send a task to the '{robot_name}' for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned.",
+                "description": f"Send a task instruction to Robot '{robot_name}' for execution. This tool should ONLY be called when you need to send a task to the '{robot_name}' for robot control or environment interaction. Do not call this tool for general conversation or information queries. The task will be executed by the CapWorker and results will be returned. IMPORTANT: Do NOT call this tool repeatedly even if the task fails - the CapWorker automatically handles retries internally. Each task call triggers multiple trial attempts with automatic optimization, so calling it again would start a completely new task execution.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -255,7 +256,21 @@ class CapWorker:
                     "success": True,
                     "message": "Task sent to CapWorker successfully",
                 },
-            }
+            },
+            {
+                "name": "get_cap_obs",
+                "description": f"Get the current observation (camera images) from Robot '{robot_name}'. Use this tool to see what the robot is currently seeing in its environment. This is useful for understanding the current state before sending a task or checking the environment. No parameters required.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+                "mockResponse": {
+                    "success": True,
+                    "message": "Observation retrieved successfully",
+                    "images": ["base64_encoded_image_data_here"],
+                },
+            },
         ]
         await self._send_message({"type": "extern_tools", "tools": extern_tools})
 
@@ -309,7 +324,7 @@ class CapWorker:
                     if records:
                         logger.info(f"Sending task_record with {len(records)} video(s)")
                         await self._send_message(
-                            {"type": "task_record", "records": records, "trail": trial}
+                            {"type": "task_record", "records": records, "trial": trial}
                         )
                     # Send result back to agent
                     await self._send_message(
@@ -325,6 +340,77 @@ class CapWorker:
                             "type": "task_result",
                             "result": {"success": False, "error": str(e)},
                         }
+                    )
+            elif msg_type == "get_cap_obs":
+                try:
+                    # Get current observation from environment
+                    obs = self.env.get_observation()
+
+                    # Extract RGB images from observation
+                    images = []
+
+                    # Try to get robot0_robotview camera (main camera)
+                    if (
+                        "robot0_robotview" in obs
+                        and "images" in obs["robot0_robotview"]
+                    ):
+                        rgb_data = obs["robot0_robotview"]["images"].get("rgb")
+                        if rgb_data is not None:
+                            import base64
+                            import cv2
+
+                            # Convert numpy array to JPEG bytes then to base64
+                            if isinstance(rgb_data, np.ndarray):
+                                _, buffer = cv2.imencode(".jpg", rgb_data)
+                                base64_image = base64.b64encode(buffer).decode("utf-8")
+                                images.append(
+                                    {
+                                        "camera": "robot0_robotview",
+                                        "image_base64": base64_image,
+                                    }
+                                )
+
+                    # Try to get wrist camera if available
+                    if (
+                        "robot0_eye_in_hand" in obs
+                        and "images" in obs["robot0_eye_in_hand"]
+                    ):
+                        rgb_data = obs["robot0_eye_in_hand"]["images"].get("rgb")
+                        if rgb_data is not None:
+                            import base64
+                            import cv2
+
+                            if isinstance(rgb_data, np.ndarray):
+                                _, buffer = cv2.imencode(".jpg", rgb_data)
+                                base64_image = base64.b64encode(buffer).decode("utf-8")
+                                images.append(
+                                    {
+                                        "camera": "robot0_eye_in_hand",
+                                        "image_base64": base64_image,
+                                    }
+                                )
+
+                    if images:
+                        logger.info(f"Sending {len(images)} camera image(s)")
+                        await self._send_message(
+                            {"type": "cap_obs_result", "images": images}
+                        )
+                    else:
+                        logger.warning("No camera images found in observation")
+                        await self._send_message(
+                            {
+                                "type": "cap_obs_result",
+                                "images": [],
+                                "error": "No camera images available",
+                            }
+                        )
+
+                except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
+                    await self._send_message(
+                        {"type": "cap_obs_result", "images": [], "error": str(e)}
                     )
             elif msg_type == "shutdown":
                 # Graceful shutdown request
